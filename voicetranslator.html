@@ -465,8 +465,12 @@
         appId: "1:77784867352:web:cfd42849e7a87a54ead96d"
         };
         
-        // LibreTranslate API endpoint
-        const TRANSLATE_API_URL = 'https://translate.argosopentech.com/translate';
+        // Translation API endpoints (with fallback options)
+        const TRANSLATE_APIS = [
+            'https://translate.argosopentech.com/translate',
+            'https://libretranslate.de/translate'
+        ];
+        let currentApiIndex = 0;
         
         // Language mappings for speech recognition
         const speechRecognitionLanguages = {
@@ -679,7 +683,7 @@
             });
         }
         
-        // Translate message for the current user
+        // Translate message for the current user with optimized fast path
         function translateMessageForUser(message) {
             const sourceLang = message.language;
             const targetLang = myLanguageSelect.value;
@@ -694,81 +698,151 @@
             // Show translation loading indicator
             loadingTranslation.style.display = 'inline';
             
-            // Temporary placeholder message while translation is in progress
+            // Try fast client-side translation first for common language pairs
+            let fastTranslation = null;
+            if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                fastTranslation = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+                if (fastTranslation && fastTranslation !== message.text.toLowerCase()) {
+                    // We have a fast translation, use it immediately
+                    displayTranslation(message, fastTranslation, sourceLang, targetLang);
+                    
+                    // Still request a better translation from the API in the background
+                    requestBetterTranslation(message, fastTranslation, sourceLang, targetLang);
+                    return;
+                }
+            }
+            
+            // No fast translation available, show temporary placeholder
             const tempMessage = document.createElement('div');
             tempMessage.className = 'message received';
+            tempMessage.id = 'temp-translation-' + Date.now();
             tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">Translating message from ${message.senderName}...</div>`;
             messagesContainer.appendChild(tempMessage);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
-            // Translate the message
+            // Set a timeout to use fallback if translation takes too long
+            const translationTimeout = setTimeout(() => {
+                // Try client-side translation as fallback
+                const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+                if (fallbackText && fallbackText !== message.text.toLowerCase()) {
+                    // Remove the temporary message if it still exists
+                    const tempEl = document.getElementById('temp-translation-' + Date.now());
+                    if (tempEl) {
+                        messagesContainer.removeChild(tempEl);
+                    }
+                    
+                    // Display fallback translation
+                    displayTranslation(message, fallbackText, sourceLang, targetLang);
+                }
+            }, 1500); // Use fallback after 1.5 seconds
+            
+            // Request translation from API
             translateText(message.text, sourceLang, targetLang)
                 .then(translatedText => {
+                    // Clear the timeout since we got a translation
+                    clearTimeout(translationTimeout);
+                    
                     // Hide loading indicator
                     loadingTranslation.style.display = 'none';
                     
                     // Remove temporary message
-                    messagesContainer.removeChild(tempMessage);
+                    const tempEl = document.getElementById('temp-translation-' + Date.now());
+                    if (tempEl) {
+                        messagesContainer.removeChild(tempEl);
+                    }
                     
                     if (translatedText && translatedText !== message.text) {
-                        // Create translation message
-                        const translationMessage = {
-                            isTranslation: true,
-                            originalSender: message.sender,
-                            senderName: message.senderName,
-                            originalText: message.text,
-                            text: translatedText,
-                            originalLang: sourceLang,
-                            targetLang: targetLang,
-                            timestamp: firebase.database.ServerValue.TIMESTAMP
-                        };
-                        
-                        // Send translation to Firebase
-                        messagesRef.push(translationMessage);
-                        
-                        // Show the translated message immediately without waiting for Firebase
-                        addTranslatedMessageToUI(translationMessage, false);
+                        // Display the translation
+                        displayTranslation(message, translatedText, sourceLang, targetLang);
                     } else {
                         // If translation failed or returned the same text, show original
                         addMessageToUI(message, false);
                     }
                 })
                 .catch(error => {
+                    // Clear the timeout since we're handling the error now
+                    clearTimeout(translationTimeout);
+                    
                     console.error('Translation error:', error);
                     loadingTranslation.style.display = 'none';
                     
                     // Remove temporary message
-                    messagesContainer.removeChild(tempMessage);
+                    const tempEl = document.getElementById('temp-translation-' + Date.now());
+                    if (tempEl) {
+                        messagesContainer.removeChild(tempEl);
+                    }
                     
-                    // Try fallback translation if API fails
-                    if ((sourceLang === 'en' && targetLang === 'es') || 
-                        (sourceLang === 'es' && targetLang === 'en')) {
-                        const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
-                        
-                        if (fallbackText && fallbackText !== message.text) {
-                            const fallbackMessage = {
+                    // Try fallback translation
+                    const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+                    if (fallbackText && fallbackText !== message.text.toLowerCase()) {
+                        displayTranslation(message, fallbackText, sourceLang, targetLang);
+                    } else {
+                        // If all translation attempts failed, show original
+                        addMessageToUI(message, false);
+                    }
+                });
+        }
+        
+        // Helper function to display a translation and save it to Firebase
+        function displayTranslation(originalMessage, translatedText, sourceLang, targetLang) {
+            // Create translation message
+            const translationMessage = {
+                isTranslation: true,
+                originalSender: originalMessage.sender,
+                senderName: originalMessage.senderName,
+                originalText: originalMessage.text,
+                text: translatedText,
+                originalLang: sourceLang,
+                targetLang: targetLang,
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            };
+            
+            // Send translation to Firebase
+            messagesRef.push(translationMessage);
+            
+            // Show the translated message immediately without waiting for Firebase
+            addTranslatedMessageToUI(translationMessage, false);
+            
+            // Hide loading indicator
+            loadingTranslation.style.display = 'none';
+        }
+        
+        // Request a better translation in the background to replace the fast one
+        function requestBetterTranslation(message, fastTranslation, sourceLang, targetLang) {
+            // Only do this for longer messages where API might be better
+            if (message.text.length < 10) return;
+            
+            // Set a short timeout to avoid too many simultaneous API calls
+            setTimeout(() => {
+                translateText(message.text, sourceLang, targetLang)
+                    .then(betterTranslation => {
+                        // Only update if significantly different from fast translation
+                        if (betterTranslation && 
+                            betterTranslation !== fastTranslation && 
+                            betterTranslation !== message.text) {
+                            
+                            // Create better translation message
+                            const betterMessage = {
                                 isTranslation: true,
                                 originalSender: message.sender,
                                 senderName: message.senderName,
                                 originalText: message.text,
-                                text: fallbackText,
+                                text: betterTranslation,
                                 originalLang: sourceLang,
                                 targetLang: targetLang,
-                                timestamp: firebase.database.ServerValue.TIMESTAMP
+                                timestamp: firebase.database.ServerValue.TIMESTAMP,
+                                isUpdate: true
                             };
                             
-                            // Send to Firebase and show immediately
-                            messagesRef.push(fallbackMessage);
-                            addTranslatedMessageToUI(fallbackMessage, false);
-                        } else {
-                            // If fallback failed too, show original
-                            addMessageToUI(message, false);
+                            // Send to Firebase
+                            messagesRef.push(betterMessage);
                         }
-                    } else {
-                        // For languages without fallback, show original
-                        addMessageToUI(message, false);
-                    }
-                });
+                    })
+                    .catch(error => {
+                        console.error('Background translation error:', error);
+                        // Keep using the fast translation, no user-visible error
+                    });
+            }, 500);
         }
         
         // Update user language
@@ -974,91 +1048,332 @@
             }
         }
         
-        // Translate text using LibreTranslate API
+        // Translate text using multiple API options with timeout and retry logic
         async function translateText(text, sourceLang, targetLang) {
+            // Use immediate fallback for common phrases (much faster than API calls)
+            if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                const quickTranslation = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                if (quickTranslation !== text) {
+                    return quickTranslation;
+                }
+            }
+            
+            // Try translation API with timeout
             try {
-                const response = await fetch(TRANSLATE_API_URL, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        q: text,
-                        source: sourceLang,
-                        target: targetLang
-                    }),
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
+                // Create a timeout promise
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Translation API timeout')), 3000);
                 });
                 
-                if (!response.ok) {
-                    throw new Error(`Translation API error: ${response.status}`);
-                }
+                // API fetch function with retry logic
+                const fetchWithRetry = async () => {
+                    const apiUrl = TRANSLATE_APIS[currentApiIndex];
+                    try {
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                q: text,
+                                source: sourceLang,
+                                target: targetLang
+                            }),
+                            headers: {
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error(`Translation API error: ${response.status}`);
+                        }
+                        
+                        const data = await response.json();
+                        return data.translatedText;
+                    } catch (error) {
+                        // Try next API endpoint
+                        currentApiIndex = (currentApiIndex + 1) % TRANSLATE_APIS.length;
+                        
+                        // If we've tried all APIs, use fallback translation
+                        if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                            return fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                        }
+                        
+                        throw error;
+                    }
+                };
                 
-                const data = await response.json();
-                return data.translatedText;
+                // Race between timeout and API call
+                const result = await Promise.race([fetchWithRetry(), timeoutPromise]);
+                return result;
             } catch (error) {
                 console.error('Translation error:', error);
                 
-                // Fallback translation for demo purposes
-                if (sourceLang === 'en' && targetLang === 'es') {
-                    return fallbackTranslate(text, 'en-es');
-                } else if (sourceLang === 'es' && targetLang === 'en') {
-                    return fallbackTranslate(text, 'es-en');
+                // If API translation failed, use extended fallback dictionary
+                if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                    return fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                }
+                
+                // For other language pairs, try a simple word-by-word translation
+                // if we have some common words in our dictionary
+                const simpleTranslation = basicWordTranslation(text, sourceLang, targetLang);
+                if (simpleTranslation !== text) {
+                    return simpleTranslation;
                 }
                 
                 throw error;
             }
         }
         
-        // Fallback translation (basic word replacement)
-        function fallbackTranslate(text, direction) {
-            if (direction === 'en-es') {
-                return text
-                    .replace(/hello/gi, 'hola')
-                    .replace(/goodbye/gi, 'adiós')
-                    .replace(/thank you/gi, 'gracias')
-                    .replace(/how are you/gi, 'cómo estás')
-                    .replace(/my name is/gi, 'me llamo')
-                    .replace(/yes/gi, 'sí')
-                    .replace(/no/gi, 'no')
-                    .replace(/please/gi, 'por favor')
-                    .replace(/sorry/gi, 'lo siento')
-                    .replace(/good morning/gi, 'buenos días')
-                    .replace(/good afternoon/gi, 'buenas tardes')
-                    .replace(/good evening/gi, 'buenas noches')
-                    .replace(/i don't understand/gi, 'no entiendo')
-                    .replace(/i understand/gi, 'entiendo')
-                    .replace(/i love/gi, 'amo')
-                    .replace(/i want/gi, 'quiero')
-                    .replace(/i need/gi, 'necesito')
-                    .replace(/today/gi, 'hoy')
-                    .replace(/tomorrow/gi, 'mañana')
-                    .replace(/yesterday/gi, 'ayer');
-            } else if (direction === 'es-en') {
-                return text
-                    .replace(/hola/gi, 'hello')
-                    .replace(/adiós/gi, 'goodbye')
-                    .replace(/gracias/gi, 'thank you')
-                    .replace(/cómo estás/gi, 'how are you')
-                    .replace(/me llamo/gi, 'my name is')
-                    .replace(/sí/gi, 'yes')
-                    .replace(/no/gi, 'no')
-                    .replace(/por favor/gi, 'please')
-                    .replace(/lo siento/gi, 'sorry')
-                    .replace(/buenos días/gi, 'good morning')
-                    .replace(/buenas tardes/gi, 'good afternoon')
-                    .replace(/buenas noches/gi, 'good evening')
-                    .replace(/no entiendo/gi, "I don't understand")
-                    .replace(/entiendo/gi, 'I understand')
-                    .replace(/amo/gi, 'I love')
-                    .replace(/quiero/gi, 'I want')
-                    .replace(/necesito/gi, 'I need')
-                    .replace(/hoy/gi, 'today')
-                    .replace(/mañana/gi, 'tomorrow')
-                    .replace(/ayer/gi, 'yesterday');
+        // Basic word-by-word translation for common terms across multiple languages
+        function basicWordTranslation(text, sourceLang, targetLang) {
+            // Dictionary of common words in multiple languages
+            const dictionary = {
+                // English translations
+                'en': {
+                    'hello': {'es': 'hola', 'fr': 'bonjour', 'de': 'hallo', 'it': 'ciao', 'ja': 'こんにちは', 'ko': '안녕하세요', 'zh': '你好', 'ru': 'привет', 'pt': 'olá'},
+                    'yes': {'es': 'sí', 'fr': 'oui', 'de': 'ja', 'it': 'sì', 'ja': 'はい', 'ko': '예', 'zh': '是的', 'ru': 'да', 'pt': 'sim'},
+                    'no': {'es': 'no', 'fr': 'non', 'de': 'nein', 'it': 'no', 'ja': 'いいえ', 'ko': '아니요', 'zh': '不', 'ru': 'нет', 'pt': 'não'},
+                    'thank you': {'es': 'gracias', 'fr': 'merci', 'de': 'danke', 'it': 'grazie', 'ja': 'ありがとう', 'ko': '감사합니다', 'zh': '谢谢', 'ru': 'спасибо', 'pt': 'obrigado'},
+                    'goodbye': {'es': 'adiós', 'fr': 'au revoir', 'de': 'auf wiedersehen', 'it': 'arrivederci', 'ja': 'さようなら', 'ko': '안녕히 가세요', 'zh': '再见', 'ru': 'до свидания', 'pt': 'adeus'}
+                }
+            };
+            
+            // Add reverse mappings (e.g., es->en, fr->en)
+            for (const word in dictionary['en']) {
+                for (const lang in dictionary['en'][word]) {
+                    if (!dictionary[lang]) {
+                        dictionary[lang] = {};
+                    }
+                    
+                    const translation = dictionary['en'][word][lang];
+                    if (!dictionary[lang][translation]) {
+                        dictionary[lang][translation] = {};
+                    }
+                    
+                    dictionary[lang][translation]['en'] = word;
+                }
             }
             
-            // If no match, return original text
+            // If we have a dictionary for the source language
+            if (dictionary[sourceLang]) {
+                let translated = text.toLowerCase();
+                
+                // Look for each word in our dictionary
+                for (const word in dictionary[sourceLang]) {
+                    if (dictionary[sourceLang][word][targetLang]) {
+                        const regex = new RegExp(`\\b${word}\\b`, 'gi');
+                        translated = translated.replace(regex, dictionary[sourceLang][word][targetLang]);
+                    }
+                }
+                
+                // Only return if we actually translated something
+                if (translated !== text.toLowerCase()) {
+                    return translated;
+                }
+            }
+            
             return text;
+        }
+        
+        // Expanded fallback translation (more comprehensive dictionary)
+        function fallbackTranslate(text, direction) {
+            const dictionaries = {
+                'en-es': {
+                    // Basic greetings
+                    'hello': 'hola',
+                    'hi': 'hola',
+                    'hey': 'hola',
+                    'good morning': 'buenos días',
+                    'good afternoon': 'buenas tardes',
+                    'good evening': 'buenas noches',
+                    'good night': 'buenas noches',
+                    'goodbye': 'adiós',
+                    'bye': 'adiós',
+                    'see you later': 'hasta luego',
+                    'see you tomorrow': 'hasta mañana',
+                    
+                    // Politeness
+                    'thank you': 'gracias',
+                    'thanks': 'gracias',
+                    'please': 'por favor',
+                    'sorry': 'lo siento',
+                    'excuse me': 'disculpe',
+                    'you\'re welcome': 'de nada',
+                    
+                    // Basic responses
+                    'yes': 'sí',
+                    'no': 'no',
+                    'maybe': 'quizás',
+                    'of course': 'por supuesto',
+                    'definitely': 'definitivamente',
+                    
+                    // Questions and conversation
+                    'how are you': 'cómo estás',
+                    'what is your name': 'cómo te llamas',
+                    'my name is': 'me llamo',
+                    'where are you from': 'de dónde eres',
+                    'i am from': 'soy de',
+                    'do you speak english': 'hablas inglés',
+                    'i don\'t understand': 'no entiendo',
+                    'i understand': 'entiendo',
+                    'can you repeat that': 'puedes repetir eso',
+                    
+                    // Common phrases
+                    'i like': 'me gusta',
+                    'i don\'t like': 'no me gusta',
+                    'i love': 'amo',
+                    'i want': 'quiero',
+                    'i need': 'necesito',
+                    'i have': 'tengo',
+                    'i don\'t have': 'no tengo',
+                    
+                    // Time expressions
+                    'today': 'hoy',
+                    'tomorrow': 'mañana',
+                    'yesterday': 'ayer',
+                    'now': 'ahora',
+                    'later': 'luego',
+                    'soon': 'pronto',
+                    
+                    // Common nouns
+                    'friend': 'amigo',
+                    'family': 'familia',
+                    'food': 'comida',
+                    'water': 'agua',
+                    'house': 'casa',
+                    'car': 'coche',
+                    'work': 'trabajo',
+                    'school': 'escuela',
+                    'restaurant': 'restaurante',
+                    'store': 'tienda',
+                    
+                    // Numbers
+                    'one': 'uno',
+                    'two': 'dos',
+                    'three': 'tres',
+                    'four': 'cuatro',
+                    'five': 'cinco',
+                    'ten': 'diez',
+                    
+                    // Adjectives
+                    'good': 'bueno',
+                    'bad': 'malo',
+                    'big': 'grande',
+                    'small': 'pequeño',
+                    'beautiful': 'hermoso',
+                    'happy': 'feliz',
+                    'sad': 'triste',
+                    'expensive': 'caro',
+                    'cheap': 'barato'
+                },
+                
+                'es-en': {
+                    // Basic greetings
+                    'hola': 'hello',
+                    'buenos días': 'good morning',
+                    'buenas tardes': 'good afternoon',
+                    'buenas noches': 'good evening',
+                    'adiós': 'goodbye',
+                    'hasta luego': 'see you later',
+                    'hasta mañana': 'see you tomorrow',
+                    
+                    // Politeness
+                    'gracias': 'thank you',
+                    'por favor': 'please',
+                    'lo siento': 'sorry',
+                    'disculpe': 'excuse me',
+                    'de nada': 'you\'re welcome',
+                    
+                    // Basic responses
+                    'sí': 'yes',
+                    'no': 'no',
+                    'quizás': 'maybe',
+                    'por supuesto': 'of course',
+                    'definitivamente': 'definitely',
+                    
+                    // Questions and conversation
+                    'cómo estás': 'how are you',
+                    'cómo te llamas': 'what is your name',
+                    'me llamo': 'my name is',
+                    'de dónde eres': 'where are you from',
+                    'soy de': 'i am from',
+                    'hablas inglés': 'do you speak english',
+                    'no entiendo': 'i don\'t understand',
+                    'entiendo': 'i understand',
+                    'puedes repetir eso': 'can you repeat that',
+                    
+                    // Common phrases
+                    'me gusta': 'i like',
+                    'no me gusta': 'i don\'t like',
+                    'amo': 'i love',
+                    'quiero': 'i want',
+                    'necesito': 'i need',
+                    'tengo': 'i have',
+                    'no tengo': 'i don\'t have',
+                    
+                    // Time expressions
+                    'hoy': 'today',
+                    'mañana': 'tomorrow',
+                    'ayer': 'yesterday',
+                    'ahora': 'now',
+                    'luego': 'later',
+                    'pronto': 'soon',
+                    
+                    // Common nouns
+                    'amigo': 'friend',
+                    'familia': 'family',
+                    'comida': 'food',
+                    'agua': 'water',
+                    'casa': 'house',
+                    'coche': 'car',
+                    'trabajo': 'work',
+                    'escuela': 'school',
+                    'restaurante': 'restaurant',
+                    'tienda': 'store',
+                    
+                    // Numbers
+                    'uno': 'one',
+                    'dos': 'two',
+                    'tres': 'three',
+                    'cuatro': 'four',
+                    'cinco': 'five',
+                    'diez': 'ten',
+                    
+                    // Adjectives
+                    'bueno': 'good',
+                    'malo': 'bad',
+                    'grande': 'big',
+                    'pequeño': 'small',
+                    'hermoso': 'beautiful',
+                    'feliz': 'happy',
+                    'triste': 'sad',
+                    'caro': 'expensive',
+                    'barato': 'cheap'
+                }
+            };
+            
+            // Get the appropriate dictionary
+            const dictionary = dictionaries[direction];
+            if (!dictionary) {
+                return text;
+            }
+            
+            // Perform the translation
+            let translatedText = text.toLowerCase();
+            
+            // Sort dictionary keys by length (descending) to handle phrases before single words
+            const sortedKeys = Object.keys(dictionary).sort((a, b) => b.length - a.length);
+            
+            // Replace each phrase/word
+            for (const phrase of sortedKeys) {
+                const regex = new RegExp(`\\b${phrase}\\b`, 'gi');
+                translatedText = translatedText.replace(regex, dictionary[phrase]);
+            }
+            
+            // If nothing was translated, return the original text
+            if (translatedText === text.toLowerCase()) {
+                return text;
+            }
+            
+            return translatedText;
         }
         
         // Add message to UI
