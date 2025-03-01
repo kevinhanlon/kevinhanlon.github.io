@@ -509,9 +509,16 @@
             // Translation cache to avoid repeated requests
             cache: {},
             
+            // Keep track of which endpoints are working best
+            endpointStats: {
+                lastSuccessful: null,
+                responseTimesMs: {},
+                failureCounts: {}
+            },
+            
             // Get cache key
             getCacheKey(text, from, to) {
-                return `${from}-${to}-${text}`;
+                return `${from}-${to}-${text.toLowerCase().trim()}`;
             },
             
             // Check cache
@@ -525,22 +532,83 @@
                 const key = this.getCacheKey(text, from, to);
                 this.cache[key] = translation;
                 
+                // Also store similar variations to improve hit rate
+                const trimmedText = text.trim();
+                if (trimmedText !== text) {
+                    const trimmedKey = this.getCacheKey(trimmedText, from, to);
+                    this.cache[trimmedKey] = translation;
+                }
+                
                 // Limit cache size
                 const keys = Object.keys(this.cache);
-                if (keys.length > 100) {
-                    delete this.cache[keys[0]];
+                if (keys.length > 200) {
+                    // Remove oldest 50 entries
+                    const keysToRemove = keys.slice(0, 50);
+                    keysToRemove.forEach(k => delete this.cache[k]);
                 }
+            },
+            
+            // Sort endpoints based on previous performance
+            getSortedEndpoints() {
+                // Copy endpoints array to avoid modifying the original
+                const sortedEndpoints = [...this.endpoints];
+                
+                // Sort by success rate and response time
+                sortedEndpoints.sort((a, b) => {
+                    const aFails = this.endpointStats.failureCounts[a.name] || 0;
+                    const bFails = this.endpointStats.failureCounts[b.name] || 0;
+                    
+                    // Prioritize endpoints with fewer failures
+                    if (aFails !== bFails) {
+                        return aFails - bFails;
+                    }
+                    
+                    // Then prioritize faster endpoints
+                    const aTime = this.endpointStats.responseTimesMs[a.name] || 5000;
+                    const bTime = this.endpointStats.responseTimesMs[b.name] || 5000;
+                    return aTime - bTime;
+                });
+                
+                return sortedEndpoints;
+            },
+            
+            // Record endpoint performance metrics
+            recordEndpointSuccess(name, responseTimeMs) {
+                this.endpointStats.lastSuccessful = name;
+                
+                // Update average response time
+                if (!this.endpointStats.responseTimesMs[name]) {
+                    this.endpointStats.responseTimesMs[name] = responseTimeMs;
+                } else {
+                    const oldTime = this.endpointStats.responseTimesMs[name];
+                    this.endpointStats.responseTimesMs[name] = (oldTime * 0.7) + (responseTimeMs * 0.3);
+                }
+            },
+            
+            recordEndpointFailure(name) {
+                if (!this.endpointStats.failureCounts[name]) {
+                    this.endpointStats.failureCounts[name] = 1;
+                } else {
+                    this.endpointStats.failureCounts[name]++;
+                }
+                
+                // Reset failure count after 10 minutes to allow retry
+                setTimeout(() => {
+                    if (this.endpointStats.failureCounts[name]) {
+                        this.endpointStats.failureCounts[name]--;
+                    }
+                }, 600000);
             },
             
             // Translate text using the best available service
             async translate(text, from, to) {
-                // Check cache first
+                // 1. Check cache first (fast path)
                 const cached = this.getCached(text, from, to);
                 if (cached) {
                     return cached;
                 }
                 
-                // First try dictionary-based translation for immediate results
+                // 2. Try dictionary-based translation for immediate results
                 const dictionaryResult = fallbackTranslate(text, `${from}-${to}`);
                 if (dictionaryResult !== text.toLowerCase()) {
                     // Cache and return the dictionary result
@@ -548,61 +616,117 @@
                     return dictionaryResult;
                 }
                 
-                // For each endpoint, create a promise with timeout
-                const translationPromises = this.endpoints.map(endpoint => {
-                    return new Promise(async (resolve, reject) => {
-                        try {
-                            const timeoutId = setTimeout(() => {
-                                reject(new Error(`Translation with ${endpoint.name} timed out`));
-                            }, 5000);
+                // 3. Look for common parts we've translated before
+                if (text.length > 10) {
+                    const words = text.split(' ');
+                    if (words.length > 3) {
+                        // Try to translate chunks we've seen before
+                        const maxChunkSize = 5; // Try up to 5-word chunks
+                        let partialTranslation = text;
+                        
+                        for (let size = maxChunkSize; size >= 3; size--) {
+                            for (let i = 0; i <= words.length - size; i++) {
+                                const chunk = words.slice(i, i + size).join(' ');
+                                const cachedChunk = this.getCached(chunk, from, to);
+                                
+                                if (cachedChunk) {
+                                    // Replace this chunk in the original text
+                                    partialTranslation = partialTranslation.replace(chunk, cachedChunk);
+                                }
+                            }
+                        }
+                        
+                        // If we managed to translate parts of it
+                        if (partialTranslation !== text) {
+                            // Cache this partial result
+                            this.setCache(text, from, to, partialTranslation);
+                            return partialTranslation;
+                        }
+                    }
+                }
+                
+                // 4. Try API translation with optimized ordering
+                // Get sorted endpoints based on historical performance
+                const sortedEndpoints = this.getSortedEndpoints();
+                
+                // Create a tracking identifier for this translation attempt
+                const translationId = Date.now();
+                
+                // Use a single concurrent request approach to avoid rate limits
+                // Try endpoints one after another with fast timeouts
+                for (const endpoint of sortedEndpoints) {
+                    // Skip endpoints with high failure counts
+                    if (this.endpointStats.failureCounts[endpoint.name] > 5) {
+                        continue;
+                    }
+                    
+                    try {
+                        const startTime = Date.now();
+                        
+                        // Create a promise that will reject after timeout
+                        const timeoutPromise = new Promise((_, reject) => {
+                            setTimeout(() => reject(new Error(`Translation timed out`)), 3000);
+                        });
+                        
+                        // Create the translation request
+                        const translationPromise = (async () => {
+                            const url = typeof endpoint.url === 'function' ? 
+                                endpoint.url(text, from, to) : endpoint.url;
                             
-                            const url = typeof endpoint.url === 'function' ? endpoint.url(text, from, to) : endpoint.url;
                             const options = {
                                 method: endpoint.method,
                                 headers: endpoint.headers || {}
                             };
                             
                             if (endpoint.body) {
-                                options.body = typeof endpoint.body === 'function' ? endpoint.body(text, from, to) : endpoint.body;
+                                options.body = typeof endpoint.body === 'function' ? 
+                                    endpoint.body(text, from, to) : endpoint.body;
                             }
                             
                             const response = await fetch(url, options);
                             
                             if (!response.ok) {
-                                clearTimeout(timeoutId);
-                                reject(new Error(`${endpoint.name} returned status ${response.status}`));
-                                return;
+                                throw new Error(`Status ${response.status}`);
                             }
                             
-                            const translatedText = await endpoint.responseHandler(response);
-                            clearTimeout(timeoutId);
+                            return await endpoint.responseHandler(response);
+                        })();
+                        
+                        // Race between translation and timeout
+                        const translatedText = await Promise.race([
+                            translationPromise,
+                            timeoutPromise
+                        ]);
+                        
+                        // Calculate response time
+                        const responseTime = Date.now() - startTime;
+                        
+                        // Verify the translation is valid
+                        if (translatedText && translatedText !== text) {
+                            // Record metrics
+                            this.recordEndpointSuccess(endpoint.name, responseTime);
                             
-                            if (translatedText && translatedText !== text) {
-                                // Cache successful translation
-                                this.setCache(text, from, to, translatedText);
-                                resolve(translatedText);
-                            } else {
-                                reject(new Error(`${endpoint.name} returned invalid translation`));
-                            }
-                        } catch (e) {
-                            reject(e);
+                            // Cache the successful translation
+                            this.setCache(text, from, to, translatedText);
+                            
+                            return translatedText;
                         }
-                    });
-                });
-                
-                // Try all endpoints in parallel and use the first successful result
-                return Promise.any(translationPromises).catch(e => {
-                    console.error('All translation services failed:', e);
-                    
-                    // Fall back to word-by-word translation as a last resort
-                    const fallbackResult = basicWordTranslation(text, from, to);
-                    if (fallbackResult !== text) {
-                        this.setCache(text, from, to, fallbackResult);
-                        return fallbackResult;
+                    } catch (error) {
+                        console.log(`Translation with ${endpoint.name} failed:`, error.message);
+                        this.recordEndpointFailure(endpoint.name);
+                        // Continue to next endpoint
                     }
-                    
-                    throw new Error('Translation failed');
-                });
+                }
+                
+                // 5. All endpoints failed, try word-by-word translation
+                const wordByWordResult = basicWordTranslation(text, from, to);
+                if (wordByWordResult !== text) {
+                    this.setCache(text, from, to, wordByWordResult);
+                    return wordByWordResult;
+                }
+                
+                // 6. All translation methods failed
+                throw new Error('All translation services failed');
             }
         };
         
@@ -817,7 +941,12 @@
             });
         }
         
-        // Translate message for the current user with enhanced translation engine
+        // Translation requests in progress 
+        let activeTranslations = 0;
+        const MAX_CONCURRENT_TRANSLATIONS = 2;
+        const pendingTranslations = [];
+        
+        // Translate message for the current user with optimized translation engine
         function translateMessageForUser(message) {
             const sourceLang = message.language;
             const targetLang = myLanguageSelect.value;
@@ -831,6 +960,56 @@
             
             // Generate a unique ID for this translation request
             const translationId = Date.now().toString();
+            
+            // Create a translation task
+            const translationTask = {
+                id: translationId,
+                message,
+                sourceLang,
+                targetLang,
+                createdAt: Date.now(),
+                execute: function() {
+                    processTranslationTask(this);
+                }
+            };
+            
+            // Check if we're already at max concurrent translations
+            if (activeTranslations >= MAX_CONCURRENT_TRANSLATIONS) {
+                // Add to pending queue
+                pendingTranslations.push(translationTask);
+                
+                // Add a placeholder message while translation is pending
+                const tempMessage = document.createElement('div');
+                tempMessage.className = 'message received';
+                tempMessage.id = `temp-translation-${translationId}`;
+                tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">
+                    Waiting to translate message from ${message.senderName}...
+                </div>`;
+                messagesContainer.appendChild(tempMessage);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                
+                // Auto-start after a timeout even if queue is full (prevent indefinite waits)
+                setTimeout(() => {
+                    // If this task is still in the queue, process it anyway
+                    const index = pendingTranslations.findIndex(task => task.id === translationId);
+                    if (index !== -1) {
+                        const task = pendingTranslations.splice(index, 1)[0];
+                        activeTranslations++;
+                        task.execute();
+                    }
+                }, 3000);
+                
+                return;
+            }
+            
+            // Start translation immediately
+            activeTranslations++;
+            processTranslationTask(translationTask);
+        }
+        
+        // Process a translation task
+        function processTranslationTask(task) {
+            const { id: translationId, message, sourceLang, targetLang } = task;
             
             // Show translation loading indicator
             loadingTranslation.style.display = 'inline';
@@ -848,9 +1027,6 @@
             if (cachedTranslation) {
                 // Use cached translation immediately
                 displayTranslationResult(cachedTranslation);
-                
-                // Still request fresh translation in the background (might be better)
-                requestBackgroundTranslation();
                 return;
             }
             
@@ -859,9 +1035,6 @@
             if (dictionaryTranslation !== message.text.toLowerCase()) {
                 // Use dictionary translation immediately
                 displayTranslationResult(dictionaryTranslation);
-                
-                // Request a better translation in the background
-                requestBackgroundTranslation();
                 return;
             }
             
@@ -902,6 +1075,9 @@
                     
                     // Hide loading indicator
                     loadingTranslation.style.display = 'none';
+                    
+                    // Complete task
+                    completeTranslationTask();
                 });
             
             // Helper to display translation result
@@ -924,51 +1100,30 @@
                     timestamp: firebase.database.ServerValue.TIMESTAMP
                 };
                 
-                // Send translation to Firebase
-                messagesRef.push(translationMessage);
+                // Send translation to Firebase (with debouncing to avoid frequent updates)
+                const firebaseKey = `${message.sender}-${Date.now()}`;
+                messagesRef.child(firebaseKey).set(translationMessage);
                 
                 // Show the translated message immediately
                 addTranslatedMessageToUI(translationMessage, false);
                 
                 // Hide loading indicator
                 loadingTranslation.style.display = 'none';
-            }
-            
-            // Helper to request a better translation in the background
-            function requestBackgroundTranslation() {
-                // Only for longer messages where API might provide better translation
-                if (message.text.length < 5) return;
                 
-                translateText(message.text, sourceLang, targetLang)
-                    .then(betterTranslation => {
-                        // Only update if significantly different from dictionary translation
-                        const initialTranslation = TranslationService.getCached(message.text, sourceLang, targetLang);
-                        if (betterTranslation && 
-                            (!initialTranslation || !betterTranslation.toLowerCase().includes(initialTranslation.toLowerCase())) && 
-                            betterTranslation !== message.text) {
-                            
-                            // Create better translation message
-                            const betterMessage = {
-                                isTranslation: true,
-                                originalSender: message.sender,
-                                senderName: message.senderName,
-                                originalText: message.text,
-                                text: betterTranslation,
-                                originalLang: sourceLang,
-                                targetLang: targetLang,
-                                timestamp: firebase.database.ServerValue.TIMESTAMP,
-                                isUpdate: true
-                            };
-                            
-                            // Send to Firebase and update UI
-                            messagesRef.push(betterMessage);
-                            addTranslatedMessageToUI(betterMessage, false);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Background translation error:', error);
-                        // No visible error to user
-                    });
+                // Complete task
+                completeTranslationTask();
+            }
+        }
+        
+        // Complete a translation task and process the next one
+        function completeTranslationTask() {
+            activeTranslations--;
+            
+            // Process next task in queue if available
+            if (pendingTranslations.length > 0) {
+                const nextTask = pendingTranslations.shift();
+                activeTranslations++;
+                nextTask.execute();
             }
         }
         
