@@ -1330,28 +1330,23 @@
             }
         }
         
-        // Translate text using advanced translation service
+        // Simple direct translation function
         async function translateText(text, sourceLang, targetLang) {
             try {
                 return await TranslationService.translate(text, sourceLang, targetLang);
             } catch (error) {
                 console.error('Translation error:', error);
                 
-                // Try fallback methods
-                // 1. Try dictionary-based translation
-                const dictionaryResult = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
-                if (dictionaryResult !== text.toLowerCase()) {
-                    return dictionaryResult;
+                // If all translation services fail, use fallback dictionary translation
+                if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                    const fallbackText = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                    if (fallbackText !== text.toLowerCase()) {
+                        return fallbackText;
+                    }
                 }
                 
-                // 2. Try word-by-word translation
-                const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
-                if (wordByWordResult !== text) {
-                    return wordByWordResult;
-                }
-                
-                // If all translation methods fail, return original text
-                throw error;
+                // If all fails, just return the original text
+                return text;
             }
         }
         
