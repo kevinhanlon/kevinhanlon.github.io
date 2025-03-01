@@ -686,9 +686,15 @@
                 return;
             }
             
+            // Show translation loading indicator
+            loadingTranslation.style.display = 'inline';
+            
             // Translate the message
             translateText(message.text, sourceLang, targetLang)
                 .then(translatedText => {
+                    // Hide loading indicator
+                    loadingTranslation.style.display = 'none';
+                    
                     if (translatedText && translatedText !== message.text) {
                         // Create translation message
                         const translationMessage = {
@@ -708,6 +714,28 @@
                 })
                 .catch(error => {
                     console.error('Translation error:', error);
+                    loadingTranslation.style.display = 'none';
+                    
+                    // Try fallback translation if API fails
+                    if (sourceLang === 'en' && targetLang === 'es' || 
+                        sourceLang === 'es' && targetLang === 'en') {
+                        const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+                        
+                        if (fallbackText && fallbackText !== message.text) {
+                            const fallbackMessage = {
+                                isTranslation: true,
+                                originalSender: message.sender,
+                                senderName: message.senderName,
+                                originalText: message.text,
+                                text: fallbackText,
+                                originalLang: sourceLang,
+                                targetLang: targetLang,
+                                timestamp: firebase.database.ServerValue.TIMESTAMP
+                            };
+                            
+                            messagesRef.push(fallbackMessage);
+                        }
+                    }
                 });
         }
         
