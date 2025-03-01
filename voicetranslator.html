@@ -465,12 +465,146 @@
         appId: "1:77784867352:web:cfd42849e7a87a54ead96d"
         };
         
-        // Translation API endpoints (with fallback options)
-        const TRANSLATE_APIS = [
-            'https://translate.argosopentech.com/translate',
-            'https://libretranslate.de/translate'
-        ];
-        let currentApiIndex = 0;
+        // Enhanced multi-service translation system
+        const TranslationService = {
+            // Translation endpoints that don't require API keys
+            endpoints: [
+                {
+                    name: 'LibreTranslate-Argos',
+                    url: 'https://translate.argosopentech.com/translate',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: (text, from, to) => JSON.stringify({
+                        q: text,
+                        source: from,
+                        target: to
+                    }),
+                    responseHandler: (response) => response.json().then(data => data.translatedText)
+                },
+                {
+                    name: 'LibreTranslate-DE',
+                    url: 'https://libretranslate.de/translate',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: (text, from, to) => JSON.stringify({
+                        q: text,
+                        source: from,
+                        target: to
+                    }),
+                    responseHandler: (response) => response.json().then(data => data.translatedText)
+                },
+                {
+                    name: 'MyMemory',
+                    url: (text, from, to) => `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}&de=youremail@example.com`,
+                    method: 'GET',
+                    responseHandler: (response) => response.json().then(data => {
+                        if (data.responseStatus === 200 && data.responseData) {
+                            return data.responseData.translatedText;
+                        }
+                        throw new Error('MyMemory translation failed');
+                    })
+                }
+            ],
+            
+            // Translation cache to avoid repeated requests
+            cache: {},
+            
+            // Get cache key
+            getCacheKey(text, from, to) {
+                return `${from}-${to}-${text}`;
+            },
+            
+            // Check cache
+            getCached(text, from, to) {
+                const key = this.getCacheKey(text, from, to);
+                return this.cache[key];
+            },
+            
+            // Set cache
+            setCache(text, from, to, translation) {
+                const key = this.getCacheKey(text, from, to);
+                this.cache[key] = translation;
+                
+                // Limit cache size
+                const keys = Object.keys(this.cache);
+                if (keys.length > 100) {
+                    delete this.cache[keys[0]];
+                }
+            },
+            
+            // Translate text using the best available service
+            async translate(text, from, to) {
+                // Check cache first
+                const cached = this.getCached(text, from, to);
+                if (cached) {
+                    return cached;
+                }
+                
+                // First try dictionary-based translation for immediate results
+                const dictionaryResult = fallbackTranslate(text, `${from}-${to}`);
+                if (dictionaryResult !== text.toLowerCase()) {
+                    // Cache and return the dictionary result
+                    this.setCache(text, from, to, dictionaryResult);
+                    return dictionaryResult;
+                }
+                
+                // For each endpoint, create a promise with timeout
+                const translationPromises = this.endpoints.map(endpoint => {
+                    return new Promise(async (resolve, reject) => {
+                        try {
+                            const timeoutId = setTimeout(() => {
+                                reject(new Error(`Translation with ${endpoint.name} timed out`));
+                            }, 5000);
+                            
+                            const url = typeof endpoint.url === 'function' ? endpoint.url(text, from, to) : endpoint.url;
+                            const options = {
+                                method: endpoint.method,
+                                headers: endpoint.headers || {}
+                            };
+                            
+                            if (endpoint.body) {
+                                options.body = typeof endpoint.body === 'function' ? endpoint.body(text, from, to) : endpoint.body;
+                            }
+                            
+                            const response = await fetch(url, options);
+                            
+                            if (!response.ok) {
+                                clearTimeout(timeoutId);
+                                reject(new Error(`${endpoint.name} returned status ${response.status}`));
+                                return;
+                            }
+                            
+                            const translatedText = await endpoint.responseHandler(response);
+                            clearTimeout(timeoutId);
+                            
+                            if (translatedText && translatedText !== text) {
+                                // Cache successful translation
+                                this.setCache(text, from, to, translatedText);
+                                resolve(translatedText);
+                            } else {
+                                reject(new Error(`${endpoint.name} returned invalid translation`));
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+                });
+                
+                // Try all endpoints in parallel and use the first successful result
+                return Promise.any(translationPromises).catch(e => {
+                    console.error('All translation services failed:', e);
+                    
+                    // Fall back to word-by-word translation as a last resort
+                    const fallbackResult = basicWordTranslation(text, from, to);
+                    if (fallbackResult !== text) {
+                        this.setCache(text, from, to, fallbackResult);
+                        return fallbackResult;
+                    }
+                    
+                    throw new Error('Translation failed');
+                });
+            }
+        };
         
         // Language mappings for speech recognition
         const speechRecognitionLanguages = {
@@ -683,7 +817,7 @@
             });
         }
         
-        // Translate message for the current user with optimized fast path
+        // Translate message for the current user with enhanced translation engine
         function translateMessageForUser(message) {
             const sourceLang = message.language;
             const targetLang = myLanguageSelect.value;
@@ -695,130 +829,122 @@
                 return;
             }
             
+            // Generate a unique ID for this translation request
+            const translationId = Date.now().toString();
+            
             // Show translation loading indicator
             loadingTranslation.style.display = 'inline';
             
-            // Try fast client-side translation first for common language pairs
-            let fastTranslation = null;
-            if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
-                fastTranslation = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
-                if (fastTranslation && fastTranslation !== message.text.toLowerCase()) {
-                    // We have a fast translation, use it immediately
-                    displayTranslation(message, fastTranslation, sourceLang, targetLang);
-                    
-                    // Still request a better translation from the API in the background
-                    requestBetterTranslation(message, fastTranslation, sourceLang, targetLang);
-                    return;
-                }
-            }
-            
-            // No fast translation available, show temporary placeholder
+            // Add a placeholder message while translation is in progress
             const tempMessage = document.createElement('div');
             tempMessage.className = 'message received';
-            tempMessage.id = 'temp-translation-' + Date.now();
+            tempMessage.id = `temp-translation-${translationId}`;
             tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">Translating message from ${message.senderName}...</div>`;
             messagesContainer.appendChild(tempMessage);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
-            // Set a timeout to use fallback if translation takes too long
+            // Try to get an immediate result from the cache or dictionary
+            const cachedTranslation = TranslationService.getCached(message.text, sourceLang, targetLang);
+            if (cachedTranslation) {
+                // Use cached translation immediately
+                displayTranslationResult(cachedTranslation);
+                
+                // Still request fresh translation in the background (might be better)
+                requestBackgroundTranslation();
+                return;
+            }
+            
+            // Try dictionary-based translation for fast results
+            const dictionaryTranslation = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+            if (dictionaryTranslation !== message.text.toLowerCase()) {
+                // Use dictionary translation immediately
+                displayTranslationResult(dictionaryTranslation);
+                
+                // Request a better translation in the background
+                requestBackgroundTranslation();
+                return;
+            }
+            
+            // Set timeout for slow translations
             const translationTimeout = setTimeout(() => {
-                // Try client-side translation as fallback
-                const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
-                if (fallbackText && fallbackText !== message.text.toLowerCase()) {
-                    // Remove the temporary message if it still exists
-                    const tempEl = document.getElementById('temp-translation-' + Date.now());
+                // Check if translation is still in progress
+                const tempEl = document.getElementById(`temp-translation-${translationId}`);
+                if (tempEl) {
+                    // Show "Translation taking longer than expected..." message
+                    tempEl.innerHTML = `<div style="font-style: italic; opacity: 0.7;">
+                        Translation taking longer than expected... 
+                        <div style="margin-top: 5px; font-size: 0.8em;">Showing original message:</div>
+                    </div>`;
+                    
+                    // Show original message after the warning
+                    addMessageToUI(message, false);
+                }
+            }, 3000);
+            
+            // Request full translation
+            translateText(message.text, sourceLang, targetLang)
+                .then(translatedText => {
+                    clearTimeout(translationTimeout);
+                    displayTranslationResult(translatedText);
+                })
+                .catch(error => {
+                    console.error('Translation error:', error);
+                    clearTimeout(translationTimeout);
+                    
+                    // Remove placeholder if it still exists
+                    const tempEl = document.getElementById(`temp-translation-${translationId}`);
                     if (tempEl) {
                         messagesContainer.removeChild(tempEl);
                     }
                     
-                    // Display fallback translation
-                    displayTranslation(message, fallbackText, sourceLang, targetLang);
-                }
-            }, 1500); // Use fallback after 1.5 seconds
-            
-            // Request translation from API
-            translateText(message.text, sourceLang, targetLang)
-                .then(translatedText => {
-                    // Clear the timeout since we got a translation
-                    clearTimeout(translationTimeout);
+                    // Show original message as fallback
+                    addMessageToUI(message, false);
                     
                     // Hide loading indicator
                     loadingTranslation.style.display = 'none';
-                    
-                    // Remove temporary message
-                    const tempEl = document.getElementById('temp-translation-' + Date.now());
-                    if (tempEl) {
-                        messagesContainer.removeChild(tempEl);
-                    }
-                    
-                    if (translatedText && translatedText !== message.text) {
-                        // Display the translation
-                        displayTranslation(message, translatedText, sourceLang, targetLang);
-                    } else {
-                        // If translation failed or returned the same text, show original
-                        addMessageToUI(message, false);
-                    }
-                })
-                .catch(error => {
-                    // Clear the timeout since we're handling the error now
-                    clearTimeout(translationTimeout);
-                    
-                    console.error('Translation error:', error);
-                    loadingTranslation.style.display = 'none';
-                    
-                    // Remove temporary message
-                    const tempEl = document.getElementById('temp-translation-' + Date.now());
-                    if (tempEl) {
-                        messagesContainer.removeChild(tempEl);
-                    }
-                    
-                    // Try fallback translation
-                    const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
-                    if (fallbackText && fallbackText !== message.text.toLowerCase()) {
-                        displayTranslation(message, fallbackText, sourceLang, targetLang);
-                    } else {
-                        // If all translation attempts failed, show original
-                        addMessageToUI(message, false);
-                    }
                 });
-        }
-        
-        // Helper function to display a translation and save it to Firebase
-        function displayTranslation(originalMessage, translatedText, sourceLang, targetLang) {
-            // Create translation message
-            const translationMessage = {
-                isTranslation: true,
-                originalSender: originalMessage.sender,
-                senderName: originalMessage.senderName,
-                originalText: originalMessage.text,
-                text: translatedText,
-                originalLang: sourceLang,
-                targetLang: targetLang,
-                timestamp: firebase.database.ServerValue.TIMESTAMP
-            };
             
-            // Send translation to Firebase
-            messagesRef.push(translationMessage);
+            // Helper to display translation result
+            function displayTranslationResult(translatedText) {
+                // Remove placeholder if it still exists
+                const tempEl = document.getElementById(`temp-translation-${translationId}`);
+                if (tempEl) {
+                    messagesContainer.removeChild(tempEl);
+                }
+                
+                // Create translation message
+                const translationMessage = {
+                    isTranslation: true,
+                    originalSender: message.sender,
+                    senderName: message.senderName,
+                    originalText: message.text,
+                    text: translatedText,
+                    originalLang: sourceLang,
+                    targetLang: targetLang,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                };
+                
+                // Send translation to Firebase
+                messagesRef.push(translationMessage);
+                
+                // Show the translated message immediately
+                addTranslatedMessageToUI(translationMessage, false);
+                
+                // Hide loading indicator
+                loadingTranslation.style.display = 'none';
+            }
             
-            // Show the translated message immediately without waiting for Firebase
-            addTranslatedMessageToUI(translationMessage, false);
-            
-            // Hide loading indicator
-            loadingTranslation.style.display = 'none';
-        }
-        
-        // Request a better translation in the background to replace the fast one
-        function requestBetterTranslation(message, fastTranslation, sourceLang, targetLang) {
-            // Only do this for longer messages where API might be better
-            if (message.text.length < 10) return;
-            
-            // Set a short timeout to avoid too many simultaneous API calls
-            setTimeout(() => {
+            // Helper to request a better translation in the background
+            function requestBackgroundTranslation() {
+                // Only for longer messages where API might provide better translation
+                if (message.text.length < 5) return;
+                
                 translateText(message.text, sourceLang, targetLang)
                     .then(betterTranslation => {
-                        // Only update if significantly different from fast translation
+                        // Only update if significantly different from dictionary translation
+                        const initialTranslation = TranslationService.getCached(message.text, sourceLang, targetLang);
                         if (betterTranslation && 
-                            betterTranslation !== fastTranslation && 
+                            (!initialTranslation || !betterTranslation.toLowerCase().includes(initialTranslation.toLowerCase())) && 
                             betterTranslation !== message.text) {
                             
                             // Create better translation message
@@ -834,15 +960,16 @@
                                 isUpdate: true
                             };
                             
-                            // Send to Firebase
+                            // Send to Firebase and update UI
                             messagesRef.push(betterMessage);
+                            addTranslatedMessageToUI(betterMessage, false);
                         }
                     })
                     .catch(error => {
                         console.error('Background translation error:', error);
-                        // Keep using the fast translation, no user-visible error
+                        // No visible error to user
                     });
-            }, 500);
+            }
         }
         
         // Update user language
@@ -1048,76 +1175,27 @@
             }
         }
         
-        // Translate text using multiple API options with timeout and retry logic
+        // Translate text using advanced translation service
         async function translateText(text, sourceLang, targetLang) {
-            // Use immediate fallback for common phrases (much faster than API calls)
-            if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
-                const quickTranslation = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
-                if (quickTranslation !== text) {
-                    return quickTranslation;
-                }
-            }
-            
-            // Try translation API with timeout
             try {
-                // Create a timeout promise
-                const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Translation API timeout')), 3000);
-                });
-                
-                // API fetch function with retry logic
-                const fetchWithRetry = async () => {
-                    const apiUrl = TRANSLATE_APIS[currentApiIndex];
-                    try {
-                        const response = await fetch(apiUrl, {
-                            method: 'POST',
-                            body: JSON.stringify({
-                                q: text,
-                                source: sourceLang,
-                                target: targetLang
-                            }),
-                            headers: {
-                                'Content-Type': 'application/json'
-                            }
-                        });
-                        
-                        if (!response.ok) {
-                            throw new Error(`Translation API error: ${response.status}`);
-                        }
-                        
-                        const data = await response.json();
-                        return data.translatedText;
-                    } catch (error) {
-                        // Try next API endpoint
-                        currentApiIndex = (currentApiIndex + 1) % TRANSLATE_APIS.length;
-                        
-                        // If we've tried all APIs, use fallback translation
-                        if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
-                            return fallbackTranslate(text, `${sourceLang}-${targetLang}`);
-                        }
-                        
-                        throw error;
-                    }
-                };
-                
-                // Race between timeout and API call
-                const result = await Promise.race([fetchWithRetry(), timeoutPromise]);
-                return result;
+                return await TranslationService.translate(text, sourceLang, targetLang);
             } catch (error) {
                 console.error('Translation error:', error);
                 
-                // If API translation failed, use extended fallback dictionary
-                if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
-                    return fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                // Try fallback methods
+                // 1. Try dictionary-based translation
+                const dictionaryResult = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                if (dictionaryResult !== text.toLowerCase()) {
+                    return dictionaryResult;
                 }
                 
-                // For other language pairs, try a simple word-by-word translation
-                // if we have some common words in our dictionary
-                const simpleTranslation = basicWordTranslation(text, sourceLang, targetLang);
-                if (simpleTranslation !== text) {
-                    return simpleTranslation;
+                // 2. Try word-by-word translation
+                const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
+                if (wordByWordResult !== text) {
+                    return wordByWordResult;
                 }
                 
+                // If all translation methods fail, return original text
                 throw error;
             }
         }
