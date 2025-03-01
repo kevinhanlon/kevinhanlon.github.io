@@ -610,9 +610,10 @@
                     return;
                 }
                 
-                // Don't process translation messages
+                // Handle translation messages
                 if (message.isTranslation) {
-                    if (message.originalSender !== userId) {
+                    // Only show translations meant for our language
+                    if (message.targetLang === myLanguageSelect.value && message.originalSender !== userId) {
                         addTranslatedMessageToUI(message, false);
                     }
                     return;
@@ -621,11 +622,13 @@
                 // Check if it's from the current user
                 const isSent = message.sender === userId;
                 
-                // Add the message to UI
-                addMessageToUI(message, isSent);
-                
-                // If not from the current user, translate it
-                if (!isSent) {
+                // Add the original message to UI
+                if (isSent || message.language === myLanguageSelect.value) {
+                    // If it's our message or already in our language, show as is
+                    addMessageToUI(message, isSent);
+                } else {
+                    // If it's in a different language, don't show original immediately
+                    // We'll wait for the translation to arrive
                     translateMessageForUser(message);
                 }
             });
@@ -683,17 +686,29 @@
             
             // Don't translate if languages are the same
             if (sourceLang === targetLang) {
+                // If language is the same, just display the original message
+                addMessageToUI(message, false);
                 return;
             }
             
             // Show translation loading indicator
             loadingTranslation.style.display = 'inline';
             
+            // Temporary placeholder message while translation is in progress
+            const tempMessage = document.createElement('div');
+            tempMessage.className = 'message received';
+            tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">Translating message from ${message.senderName}...</div>`;
+            messagesContainer.appendChild(tempMessage);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
             // Translate the message
             translateText(message.text, sourceLang, targetLang)
                 .then(translatedText => {
                     // Hide loading indicator
                     loadingTranslation.style.display = 'none';
+                    
+                    // Remove temporary message
+                    messagesContainer.removeChild(tempMessage);
                     
                     if (translatedText && translatedText !== message.text) {
                         // Create translation message
@@ -710,15 +725,24 @@
                         
                         // Send translation to Firebase
                         messagesRef.push(translationMessage);
+                        
+                        // Show the translated message immediately without waiting for Firebase
+                        addTranslatedMessageToUI(translationMessage, false);
+                    } else {
+                        // If translation failed or returned the same text, show original
+                        addMessageToUI(message, false);
                     }
                 })
                 .catch(error => {
                     console.error('Translation error:', error);
                     loadingTranslation.style.display = 'none';
                     
+                    // Remove temporary message
+                    messagesContainer.removeChild(tempMessage);
+                    
                     // Try fallback translation if API fails
-                    if (sourceLang === 'en' && targetLang === 'es' || 
-                        sourceLang === 'es' && targetLang === 'en') {
+                    if ((sourceLang === 'en' && targetLang === 'es') || 
+                        (sourceLang === 'es' && targetLang === 'en')) {
                         const fallbackText = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
                         
                         if (fallbackText && fallbackText !== message.text) {
@@ -733,8 +757,16 @@
                                 timestamp: firebase.database.ServerValue.TIMESTAMP
                             };
                             
+                            // Send to Firebase and show immediately
                             messagesRef.push(fallbackMessage);
+                            addTranslatedMessageToUI(fallbackMessage, false);
+                        } else {
+                            // If fallback failed too, show original
+                            addMessageToUI(message, false);
                         }
+                    } else {
+                        // For languages without fallback, show original
+                        addMessageToUI(message, false);
                     }
                 });
         }
