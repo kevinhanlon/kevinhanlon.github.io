@@ -427,6 +427,12 @@
                 if (peerConnection.iceConnectionState === 'connected' || 
                     peerConnection.iceConnectionState === 'completed') {
                     updateConnectionStatus(true, 'Connected to partner');
+                    
+                    // When connection is established, make sure we send user info
+                    if (dataChannel && dataChannel.readyState === 'open') {
+                        console.log("Connection established - sending user info");
+                        sendUserInfo();
+                    }
                 } else if (peerConnection.iceConnectionState === 'disconnected' || 
                           peerConnection.iceConnectionState === 'failed' ||
                           peerConnection.iceConnectionState === 'closed') {
@@ -491,7 +497,16 @@
                 
                 // Send initial information
                 if (channel.readyState === 'open') {
+                    console.log("Data channel ready - sending user info");
                     sendUserInfo();
+                    
+                    // Request partner info if it hasn't been received yet
+                    if (partnerNameDisplay.textContent === 'Waiting...' || !partnerLanguage.value) {
+                        console.log("Requesting partner info");
+                        channel.send(JSON.stringify({
+                            type: 'info-request'
+                        }));
+                    }
                 }
             };
             
@@ -529,27 +544,29 @@
             console.log("Received message:", message);
             
             switch (message.type) {
+                case 'info-request':
+                    // Partner is requesting our info, send it immediately
+                    console.log("Received info request - sending user info");
+                    sendUserInfo();
+                    break;
+                    
                 case 'info':
                     // Partner info received
+                    console.log("Received partner info:", message);
                     partnerNameDisplay.textContent = message.name;
                     
                     // Update partner language display
-                    for (const option of partnerLanguage.options) {
-                        if (option.value === message.language) {
-                            option.selected = true;
-                            break;
-                        }
-                    }
+                    // Clear existing options first
+                    partnerLanguage.innerHTML = '';
                     
-                    if (partnerLanguage.selectedIndex === -1 && partnerLanguage.options.length > 0) {
-                        // If no match found, add a new option
-                        const newOption = document.createElement('option');
-                        newOption.value = message.language;
-                        const langName = getLangNameFromCode(message.language);
-                        newOption.textContent = langName;
-                        partnerLanguage.innerHTML = '';
-                        partnerLanguage.appendChild(newOption);
-                    }
+                    // Add the partner's language
+                    const newOption = document.createElement('option');
+                    newOption.value = message.language;
+                    const langName = getLangNameFromCode(message.language);
+                    newOption.textContent = langName;
+                    partnerLanguage.appendChild(newOption);
+                    
+                    console.log("Updated partner info display");
                     break;
                     
                 case 'transcript':
@@ -770,7 +787,6 @@
         // Create a new conversation
         function createConversation() {
             isInitiator = true;
-            setupWebRTC(true);
             
             // Set initial language from setup
             yourLanguageInConvo.value = yourLanguageSelect.value;
@@ -778,6 +794,9 @@
             // Show translator interface
             setupContainer.classList.add('hidden');
             translatorContainer.classList.remove('hidden');
+            
+            // Set up WebRTC after UI is ready
+            setupWebRTC(true);
         }
         
         // Join an existing conversation
@@ -795,13 +814,16 @@
                 // Set initial language from setup
                 yourLanguageInConvo.value = yourLanguageSelect.value;
                 
-                // Set partner info if available
+                // Immediately set partner info if available
+                console.log("Join data received:", data);
                 if (data.name) {
+                    console.log("Setting partner name from join data:", data.name);
                     partnerNameDisplay.textContent = data.name;
                 }
                 
                 if (data.language) {
                     // Update partner language display
+                    console.log("Setting partner language from join data:", data.language);
                     const langName = getLangNameFromCode(data.language);
                     partnerLanguage.innerHTML = `<option value="${data.language}">${langName}</option>`;
                 }
@@ -866,13 +888,17 @@
                     throw new Error("Invalid answer data");
                 }
                 
+                console.log("Processing answer data:", data);
+                
                 // Set partner info if available
                 if (data.name) {
+                    console.log("Setting partner name from answer:", data.name);
                     partnerNameDisplay.textContent = data.name;
                 }
                 
                 if (data.language) {
                     // Update partner language display
+                    console.log("Setting partner language from answer:", data.language);
                     const langName = getLangNameFromCode(data.language);
                     partnerLanguage.innerHTML = `<option value="${data.language}">${langName}</option>`;
                 }
