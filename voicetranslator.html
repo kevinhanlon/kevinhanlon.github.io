@@ -11,6 +11,8 @@
             --accent-color: #F1F6F5;
             --dark-color: #472183;
             --error-color: #e74c3c;
+            --success-color: #2ecc71;
+            --warning-color: #f39c12;
         }
         
         * {
@@ -195,6 +197,12 @@
             font-size: 14px;
             color: #666;
             margin-left: 10px;
+            transition: opacity 0.3s ease;
+        }
+        
+        .recording-indicator.active {
+            color: var(--error-color);
+            font-weight: bold;
         }
         
         .share-container {
@@ -238,7 +246,7 @@
         }
         
         .connected {
-            background-color: #2ecc71;
+            background-color: var(--success-color);
         }
         
         .disconnected {
@@ -246,7 +254,7 @@
         }
         
         .connecting {
-            background-color: #f39c12;
+            background-color: var(--warning-color);
         }
         
         /* Responsive */
@@ -284,11 +292,41 @@
             display: none;
         }
         
-        #loadingTranslation {
+        .processing-indicator {
+            display: none;
+            align-items: center;
+            margin-left: 10px;
             font-style: italic;
             color: #777;
-            margin-left: 10px;
-            display: none;
+        }
+        
+        .processing-indicator .dots {
+            display: inline-block;
+            width: 30px;
+        }
+        
+        @keyframes dot-pulse {
+            0% { opacity: 0.2; }
+            20% { opacity: 1; }
+            100% { opacity: 0.2; }
+        }
+        
+        .processing-indicator .dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: #777;
+            margin-right: 3px;
+            animation: dot-pulse 1.5s infinite;
+        }
+        
+        .processing-indicator .dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        
+        .processing-indicator .dot:nth-child(3) {
+            animation-delay: 0.4s;
         }
         
         .demo-message {
@@ -330,6 +368,28 @@
             padding: 3px 10px;
             margin: 2px;
             white-space: nowrap;
+        }
+        
+        /* Audio level visualization */
+        .audio-level {
+            display: none;
+            width: 150px;
+            height: 15px;
+            margin-left: 10px;
+            background-color: #f1f1f1;
+            border-radius: 7px;
+            overflow: hidden;
+        }
+        
+        .audio-level-bar {
+            height: 100%;
+            width: 0%;
+            background-color: var(--primary-color);
+            transition: width 0.1s ease;
+        }
+        
+        .recording .audio-level {
+            display: block;
         }
     </style>
 </head>
@@ -398,7 +458,12 @@
                         </svg>
                     </button>
                     <span class="recording-indicator" id="recordingStatus">Join chat to start recording</span>
-                    <span id="loadingTranslation">Translating...</span>
+                    <div class="audio-level">
+                        <div class="audio-level-bar"></div>
+                    </div>
+                    <div class="processing-indicator" id="processingIndicator">
+                        Translating <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -435,10 +500,11 @@
         const connectionStatus = document.getElementById('connectionStatus');
         const connectionText = document.getElementById('connectionText');
         const errorNotification = document.getElementById('errorNotification');
-        const loadingTranslation = document.getElementById('loadingTranslation');
+        const processingIndicator = document.getElementById('processingIndicator');
         const usernameInput = document.getElementById('username');
         const joinButton = document.getElementById('joinButton');
         const participantsList = document.getElementById('participantsList');
+        const audioLevelBar = document.querySelector('.audio-level-bar');
         
         // Global variables
         let isRecording = false;
@@ -453,16 +519,28 @@
         let messagesRef = null;
         let participantsRef = null;
         let currentParticipants = {};
+        let recordingTimeout = null;
+        let silenceTimer = null;
+        let lastSpeechTimestamp = 0;
+        let translationTimeouts = {};
+        let audioContext = null;
+        let audioAnalyser = null;
+        let microphoneStream = null;
+        
+        // Constants
+        const RECORDING_MAX_DURATION = 15000; // 15 seconds
+        const SILENCE_THRESHOLD = 1500; // 1.5 seconds of silence
+        const TRANSLATION_TIMEOUT = 8000; // 8 seconds
         
         // Firebase configuration
         const firebaseConfig = {
-        apiKey: "AIzaSyBMLVaTvgyby9dud7joT8amyCJkD233BlU",
-        authDomain: "voice-translator-20c5f.firebaseapp.com",
-        databaseURL: "https://voice-translator-20c5f-default-rtdb.firebaseio.com",
-        projectId: "voice-translator-20c5f",
-        storageBucket: "voice-translator-20c5f.firebasestorage.app",
-        messagingSenderId: "77784867352",
-        appId: "1:77784867352:web:cfd42849e7a87a54ead96d"
+            apiKey: "AIzaSyBMLVaTvgyby9dud7joT8amyCJkD233BlU",
+            authDomain: "voice-translator-20c5f.firebaseapp.com",
+            databaseURL: "https://voice-translator-20c5f-default-rtdb.firebaseio.com",
+            projectId: "voice-translator-20c5f",
+            storageBucket: "voice-translator-20c5f.firebasestorage.app",
+            messagingSenderId: "77784867352",
+            appId: "1:77784867352:web:cfd42849e7a87a54ead96d"
         };
         
         // Enhanced multi-service translation system
@@ -506,8 +584,10 @@
                 }
             ],
             
-            // Translation cache to avoid repeated requests
+            // Translation cache with expiration
             cache: {},
+            cacheExpiration: {}, // Store timestamp for each cache entry
+            cacheTTL: 1000 * 60 * 60 * 24, // 24 hours
             
             // Keep track of which endpoints are working best
             endpointStats: {
@@ -521,30 +601,54 @@
                 return `${from}-${to}-${text.toLowerCase().trim()}`;
             },
             
-            // Check cache
+            // Check cache with expiration
             getCached(text, from, to) {
                 const key = this.getCacheKey(text, from, to);
-                return this.cache[key];
+                const cacheEntry = this.cache[key];
+                const timestamp = this.cacheExpiration[key];
+                
+                // Return cache hit only if it hasn't expired
+                if (cacheEntry && timestamp && Date.now() - timestamp < this.cacheTTL) {
+                    console.log('Translation cache hit:', key);
+                    return cacheEntry;
+                }
+                
+                return null;
             },
             
-            // Set cache
+            // Set cache with expiration timestamp
             setCache(text, from, to, translation) {
                 const key = this.getCacheKey(text, from, to);
                 this.cache[key] = translation;
+                this.cacheExpiration[key] = Date.now();
                 
                 // Also store similar variations to improve hit rate
                 const trimmedText = text.trim();
                 if (trimmedText !== text) {
                     const trimmedKey = this.getCacheKey(trimmedText, from, to);
                     this.cache[trimmedKey] = translation;
+                    this.cacheExpiration[trimmedKey] = Date.now();
                 }
                 
                 // Limit cache size
+                this.pruneCache();
+            },
+            
+            // Remove old entries from cache
+            pruneCache() {
                 const keys = Object.keys(this.cache);
                 if (keys.length > 200) {
+                    // Sort keys by timestamp (oldest first)
+                    const sortedKeys = keys.sort((a, b) => 
+                        (this.cacheExpiration[a] || 0) - (this.cacheExpiration[b] || 0)
+                    );
+                    
                     // Remove oldest 50 entries
-                    const keysToRemove = keys.slice(0, 50);
-                    keysToRemove.forEach(k => delete this.cache[k]);
+                    const keysToRemove = sortedKeys.slice(0, 50);
+                    keysToRemove.forEach(k => {
+                        delete this.cache[k];
+                        delete this.cacheExpiration[k];
+                    });
                 }
             },
             
@@ -600,7 +704,7 @@
                 }, 600000);
             },
             
-            // Translate text using the best available service
+            // Translate text using the best available service with improved error handling
             async translate(text, from, to) {
                 // 1. Check cache first (fast path)
                 const cached = this.getCached(text, from, to);
@@ -649,9 +753,6 @@
                 // Get sorted endpoints based on historical performance
                 const sortedEndpoints = this.getSortedEndpoints();
                 
-                // Create a tracking identifier for this translation attempt
-                const translationId = Date.now();
-                
                 // Use a single concurrent request approach to avoid rate limits
                 // Try endpoints one after another with fast timeouts
                 for (const endpoint of sortedEndpoints) {
@@ -663,12 +764,7 @@
                     try {
                         const startTime = Date.now();
                         
-                        // Create a promise that will reject after timeout
-                        const timeoutPromise = new Promise((_, reject) => {
-                            setTimeout(() => reject(new Error(`Translation timed out`)), 3000);
-                        });
-                        
-                        // Create the translation request
+                        // Create the translation request with timeout
                         const translationPromise = (async () => {
                             const url = typeof endpoint.url === 'function' ? 
                                 endpoint.url(text, from, to) : endpoint.url;
@@ -683,27 +779,35 @@
                                     endpoint.body(text, from, to) : endpoint.body;
                             }
                             
-                            const response = await fetch(url, options);
+                            // Add timeout to fetch
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 3000);
+                            options.signal = controller.signal;
                             
-                            if (!response.ok) {
-                                throw new Error(`Status ${response.status}`);
+                            try {
+                                const response = await fetch(url, options);
+                                clearTimeout(timeoutId);
+                                
+                                if (!response.ok) {
+                                    throw new Error(`Status ${response.status}`);
+                                }
+                                
+                                return await endpoint.responseHandler(response);
+                            } finally {
+                                clearTimeout(timeoutId);
                             }
-                            
-                            return await endpoint.responseHandler(response);
                         })();
                         
-                        // Race between translation and timeout
+                        // Execute the promise with timeout
                         const translatedText = await Promise.race([
                             translationPromise,
-                            timeoutPromise
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Translation timed out')), 3000))
                         ]);
-                        
-                        // Calculate response time
-                        const responseTime = Date.now() - startTime;
                         
                         // Verify the translation is valid
                         if (translatedText && translatedText !== text) {
                             // Record metrics
+                            const responseTime = Date.now() - startTime;
                             this.recordEndpointSuccess(endpoint.name, responseTime);
                             
                             // Cache the successful translation
@@ -726,7 +830,8 @@
                 }
                 
                 // 6. All translation methods failed
-                throw new Error('All translation services failed');
+                console.warn('All translation services failed. Returning original text.');
+                return text;
             }
         };
         
@@ -863,7 +968,10 @@
         
         // Listen for new messages
         function setupMessageListener() {
-            messagesRef.orderByChild('timestamp').startAt(Date.now()).on('child_added', (snapshot) => {
+            // Create a timestamp to only get new messages
+            const startTime = Date.now();
+            
+            messagesRef.orderByChild('timestamp').startAt(startTime).on('child_added', (snapshot) => {
                 const message = snapshot.val();
                 
                 // Check if it's a system message
@@ -874,7 +982,7 @@
                 
                 // Handle translation messages
                 if (message.isTranslation) {
-                    // Only show translations meant for our language
+                    // Only show translations for our language and not from ourselves
                     if (message.targetLang === myLanguageSelect.value && message.originalSender !== userId) {
                         addTranslatedMessageToUI(message, false);
                     }
@@ -884,14 +992,32 @@
                 // Check if it's from the current user
                 const isSent = message.sender === userId;
                 
-                // Add the original message to UI
-                if (isSent || message.language === myLanguageSelect.value) {
-                    // If it's our message or already in our language, show as is
-                    addMessageToUI(message, isSent);
-                } else {
-                    // If it's in a different language, don't show original immediately
-                    // We'll wait for the translation to arrive
-                    translateMessageForUser(message);
+                // If it's our message, show it as is
+                if (isSent) {
+                    addMessageToUI(message, true);
+                    return;
+                }
+                
+                // If it's in our language, show as is
+                if (message.language === myLanguageSelect.value) {
+                    addMessageToUI(message, false);
+                    return;
+                }
+                
+                // For messages in different languages, translate them
+                translateMessageForUser(message);
+            });
+            
+            // Also listen for changes to existing messages (for updates)
+            messagesRef.orderByChild('timestamp').startAt(startTime).on('child_changed', (snapshot) => {
+                const message = snapshot.val();
+                
+                // Only care about translation updates
+                if (message.isTranslation && message.isUpdate && 
+                    message.targetLang === myLanguageSelect.value && 
+                    message.originalSender !== userId) {
+                    
+                    addTranslatedMessageToUI(message, false);
                 }
             });
         }
@@ -941,190 +1067,109 @@
             });
         }
         
-        // Translation requests in progress 
-        let activeTranslations = 0;
-        const MAX_CONCURRENT_TRANSLATIONS = 2;
-        const pendingTranslations = [];
-        
-        // Translate message for the current user with optimized translation engine
+        // Improved translation handler with timeouts
         function translateMessageForUser(message) {
             const sourceLang = message.language;
             const targetLang = myLanguageSelect.value;
             
             // Don't translate if languages are the same
             if (sourceLang === targetLang) {
-                // If language is the same, just display the original message
                 addMessageToUI(message, false);
                 return;
             }
             
-            // Generate a unique ID for this translation request
-            const translationId = Date.now().toString();
+            // Show translation processing indicator
+            processingIndicator.style.display = 'inline-flex';
             
-            // Create a translation task
-            const translationTask = {
-                id: translationId,
-                message,
-                sourceLang,
-                targetLang,
-                createdAt: Date.now(),
-                execute: function() {
-                    processTranslationTask(this);
-                }
-            };
-            
-            // Check if we're already at max concurrent translations
-            if (activeTranslations >= MAX_CONCURRENT_TRANSLATIONS) {
-                // Add to pending queue
-                pendingTranslations.push(translationTask);
-                
-                // Add a placeholder message while translation is pending
-                const tempMessage = document.createElement('div');
-                tempMessage.className = 'message received';
-                tempMessage.id = `temp-translation-${translationId}`;
-                tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">
-                    Waiting to translate message from ${message.senderName}...
-                </div>`;
-                messagesContainer.appendChild(tempMessage);
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                
-                // Auto-start after a timeout even if queue is full (prevent indefinite waits)
-                setTimeout(() => {
-                    // If this task is still in the queue, process it anyway
-                    const index = pendingTranslations.findIndex(task => task.id === translationId);
-                    if (index !== -1) {
-                        const task = pendingTranslations.splice(index, 1)[0];
-                        activeTranslations++;
-                        task.execute();
-                    }
-                }, 3000);
-                
-                return;
-            }
-            
-            // Start translation immediately
-            activeTranslations++;
-            processTranslationTask(translationTask);
-        }
-        
-        // Process a translation task
-        function processTranslationTask(task) {
-            const { id: translationId, message, sourceLang, targetLang } = task;
-            
-            // Show translation loading indicator
-            loadingTranslation.style.display = 'inline';
+            // Generate a unique ID for this translation
+            const translationId = `translation-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
             
             // Add a placeholder message while translation is in progress
             const tempMessage = document.createElement('div');
             tempMessage.className = 'message received';
-            tempMessage.id = `temp-translation-${translationId}`;
+            tempMessage.id = translationId;
             tempMessage.innerHTML = `<div style="font-style: italic; opacity: 0.7;">Translating message from ${message.senderName}...</div>`;
             messagesContainer.appendChild(tempMessage);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
-            // Try to get an immediate result from the cache or dictionary
-            const cachedTranslation = TranslationService.getCached(message.text, sourceLang, targetLang);
-            if (cachedTranslation) {
-                // Use cached translation immediately
-                displayTranslationResult(cachedTranslation);
-                return;
-            }
-            
-            // Try dictionary-based translation for fast results
-            const dictionaryTranslation = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
-            if (dictionaryTranslation !== message.text.toLowerCase()) {
-                // Use dictionary translation immediately
-                displayTranslationResult(dictionaryTranslation);
-                return;
-            }
-            
-            // Set timeout for slow translations
+            // Add a timeout to handle stuck translations
             const translationTimeout = setTimeout(() => {
-                // Check if translation is still in progress
-                const tempEl = document.getElementById(`temp-translation-${translationId}`);
-                if (tempEl) {
-                    // Show "Translation taking longer than expected..." message
-                    tempEl.innerHTML = `<div style="font-style: italic; opacity: 0.7;">
-                        Translation taking longer than expected... 
-                        <div style="margin-top: 5px; font-size: 0.8em;">Showing original message:</div>
-                    </div>`;
-                    
-                    // Show original message after the warning
-                    addMessageToUI(message, false);
-                }
-            }, 3000);
-            
-            // Request full translation
-            translateText(message.text, sourceLang, targetLang)
-                .then(translatedText => {
-                    clearTimeout(translationTimeout);
-                    displayTranslationResult(translatedText);
-                })
-                .catch(error => {
-                    console.error('Translation error:', error);
-                    clearTimeout(translationTimeout);
-                    
-                    // Remove placeholder if it still exists
-                    const tempEl = document.getElementById(`temp-translation-${translationId}`);
-                    if (tempEl) {
-                        messagesContainer.removeChild(tempEl);
-                    }
-                    
-                    // Show original message as fallback
-                    addMessageToUI(message, false);
-                    
-                    // Hide loading indicator
-                    loadingTranslation.style.display = 'none';
-                    
-                    // Complete task
-                    completeTranslationTask();
-                });
-            
-            // Helper to display translation result
-            function displayTranslationResult(translatedText) {
-                // Remove placeholder if it still exists
-                const tempEl = document.getElementById(`temp-translation-${translationId}`);
-                if (tempEl) {
-                    messagesContainer.removeChild(tempEl);
-                }
-                
-                // Create translation message
-                const translationMessage = {
-                    isTranslation: true,
-                    originalSender: message.sender,
-                    senderName: message.senderName,
-                    originalText: message.text,
-                    text: translatedText,
-                    originalLang: sourceLang,
-                    targetLang: targetLang,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP
-                };
-                
-                // Send translation to Firebase (with debouncing to avoid frequent updates)
-                const firebaseKey = `${message.sender}-${Date.now()}`;
-                messagesRef.child(firebaseKey).set(translationMessage);
-                
-                // Show the translated message immediately
-                addTranslatedMessageToUI(translationMessage, false);
+                console.warn(`Translation timeout for message: ${translationId}`);
                 
                 // Hide loading indicator
-                loadingTranslation.style.display = 'none';
+                processingIndicator.style.display = 'none';
                 
-                // Complete task
-                completeTranslationTask();
-            }
-        }
-        
-        // Complete a translation task and process the next one
-        function completeTranslationTask() {
-            activeTranslations--;
+                // Remove placeholder message
+                const placeholder = document.getElementById(translationId);
+                if (placeholder) {
+                    messagesContainer.removeChild(placeholder);
+                }
+                
+                // Show original message if translation timed out
+                addMessageToUI(message, false);
+                
+            }, TRANSLATION_TIMEOUT);
             
-            // Process next task in queue if available
-            if (pendingTranslations.length > 0) {
-                const nextTask = pendingTranslations.shift();
-                activeTranslations++;
-                nextTask.execute();
-            }
+            // Store timeout reference
+            translationTimeouts[translationId] = translationTimeout;
+            
+            // Translate the message
+            translateText(message.text, sourceLang, targetLang)
+                .then(translatedText => {
+                    // Clear the timeout
+                    clearTimeout(translationTimeouts[translationId]);
+                    delete translationTimeouts[translationId];
+                    
+                    // Hide loading indicator
+                    processingIndicator.style.display = 'none';
+                    
+                    // Remove placeholder message
+                    const placeholder = document.getElementById(translationId);
+                    if (placeholder) {
+                        messagesContainer.removeChild(placeholder);
+                    }
+                    
+                    // Create a unique message ID
+                    const messageId = `msg-${message.sender}-${message.timestamp || Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                    
+                    // Create translation message
+                    const translationMessage = {
+                        isTranslation: true,
+                        originalSender: message.sender,
+                        senderName: message.senderName,
+                        originalText: message.text,
+                        text: translatedText,
+                        originalLang: sourceLang,
+                        targetLang: targetLang,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP,
+                        messageId: messageId
+                    };
+                    
+                    // Send translation to Firebase
+                    messagesRef.push(translationMessage);
+                    
+                    // Show the translated message immediately
+                    addTranslatedMessageToUI(translationMessage, false);
+                })
+                .catch(error => {
+                    // Clear the timeout
+                    clearTimeout(translationTimeouts[translationId]);
+                    delete translationTimeouts[translationId];
+                    
+                    console.error(`Translation error for ID: ${translationId}`, error);
+                    
+                    // Hide loading indicator
+                    processingIndicator.style.display = 'none';
+                    
+                    // Remove placeholder message
+                    const placeholder = document.getElementById(translationId);
+                    if (placeholder) {
+                        messagesContainer.removeChild(placeholder);
+                    }
+                    
+                    // Show original message if translation failed
+                    addMessageToUI(message, false);
+                });
         }
         
         // Update user language
@@ -1167,6 +1212,9 @@
                 // Remove user
                 userRef.remove();
             }
+            
+            // Stop audio context if active
+            stopAudioVisualization();
         }
         
         // Generate a random ID
@@ -1174,7 +1222,7 @@
             return Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
         }
         
-        // Set up speech recognition
+        // Set up speech recognition with silence detection
         function setupSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             
@@ -1191,13 +1239,55 @@
             // Set initial language
             updateSpeechRecognition();
             
-            speechRecognition.onresult = handleSpeechResult;
+            // Set up event handlers with silence detection
+            speechRecognition.onresult = function(event) {
+                const results = event.results;
+                
+                if (results.length > 0) {
+                    // Update the last speech timestamp
+                    lastSpeechTimestamp = Date.now();
+                    
+                    // Reset any existing silence timer
+                    if (silenceTimer) {
+                        clearTimeout(silenceTimer);
+                    }
+                    
+                    // Set a new silence timer to stop recording after silence
+                    silenceTimer = setTimeout(() => {
+                        if (isRecording && Date.now() - lastSpeechTimestamp >= SILENCE_THRESHOLD) {
+                            console.log("Silence detected, stopping recording");
+                            stopRecording();
+                        }
+                    }, SILENCE_THRESHOLD);
+                    
+                    // Process final results
+                    const result = results[results.length - 1];
+                    
+                    if (result.isFinal) {
+                        const text = result[0].transcript.trim();
+                        if (text) {
+                            recordingStatus.textContent = 'Processing...';
+                            
+                            // Send message to Firebase
+                            sendMessageToFirebase(text);
+                        } else {
+                            recordingStatus.textContent = 'No speech detected. Try again.';
+                        }
+                    }
+                }
+            };
+            
             speechRecognition.onerror = handleSpeechError;
+            
             speechRecognition.onend = function() {
                 if (isRecording) {
                     isRecording = false;
                     recordButton.classList.remove('recording');
                     recordingStatus.textContent = 'Processing...';
+                    recordingStatus.classList.remove('active');
+                    
+                    // Stop audio visualization
+                    stopAudioVisualization();
                 }
             };
         }
@@ -1222,7 +1312,7 @@
             }
         }
         
-        // Start recording
+        // Start recording with automatic timeout
         function startRecording() {
             if (!speechRecognition || !hasJoined) return;
             
@@ -1231,6 +1321,21 @@
                 isRecording = true;
                 recordButton.classList.add('recording');
                 recordingStatus.textContent = 'Recording... Speak now';
+                recordingStatus.classList.add('active');
+                
+                // Start audio visualization
+                startAudioVisualization();
+                
+                // Set the initial speech timestamp
+                lastSpeechTimestamp = Date.now();
+                
+                // Add a maximum recording duration timeout
+                recordingTimeout = setTimeout(() => {
+                    if (isRecording) {
+                        stopRecording();
+                        recordingStatus.textContent = 'Recording stopped (maximum time reached)';
+                    }
+                }, RECORDING_MAX_DURATION);
                 
                 // Update active timestamp
                 if (userRef) {
@@ -1244,39 +1349,52 @@
             }
         }
         
-        // Stop recording
+        // Stop recording and clear timeouts
         function stopRecording() {
             if (!speechRecognition || !isRecording) return;
             
+            // Clear all timeouts
+            clearTimeout(recordingTimeout);
+            clearTimeout(silenceTimer);
+            
             try {
                 speechRecognition.stop();
-                // Note: isRecording will be set to false in the onend handler
+                
+                // Stop audio visualization
+                stopAudioVisualization();
+                
+                // Visual feedback will be handled in onend handler
+                
             } catch (error) {
                 console.error('Error stopping speech recognition:', error);
                 isRecording = false;
                 recordButton.classList.remove('recording');
                 recordingStatus.textContent = 'Click to start recording';
+                recordingStatus.classList.remove('active');
+                
+                // Stop audio visualization
+                stopAudioVisualization();
             }
         }
         
-        // Handle speech recognition results
-        function handleSpeechResult(event) {
-            const results = event.results;
+        // Handle speech recognition errors
+        function handleSpeechError(event) {
+            console.error('Speech recognition error:', event.error);
             
-            if (results.length > 0) {
-                const result = results[results.length - 1];
-                
-                if (result.isFinal) {
-                    const text = result[0].transcript.trim();
-                    if (text) {
-                        recordingStatus.textContent = 'Processing...';
-                        
-                        // Send message to Firebase
-                        sendMessageToFirebase(text);
-                    } else {
-                        recordingStatus.textContent = 'No speech detected. Try again.';
-                    }
-                }
+            isRecording = false;
+            recordButton.classList.remove('recording');
+            recordingStatus.classList.remove('active');
+            
+            // Stop audio visualization
+            stopAudioVisualization();
+            
+            if (event.error === 'no-speech') {
+                recordingStatus.textContent = 'No speech detected. Try again.';
+            } else if (event.error === 'aborted') {
+                recordingStatus.textContent = 'Recording stopped.';
+            } else {
+                showError(`Speech recognition error: ${event.error}`);
+                recordingStatus.textContent = 'Click to start recording';
             }
         }
         
@@ -1313,39 +1431,41 @@
                 });
         }
         
-        // Handle speech recognition errors
-        function handleSpeechError(event) {
-            console.error('Speech recognition error:', event.error);
-            
-            isRecording = false;
-            recordButton.classList.remove('recording');
-            
-            if (event.error === 'no-speech') {
-                recordingStatus.textContent = 'No speech detected. Try again.';
-            } else if (event.error === 'aborted') {
-                recordingStatus.textContent = 'Recording stopped.';
-            } else {
-                showError(`Speech recognition error: ${event.error}`);
-                recordingStatus.textContent = 'Click to start recording';
-            }
-        }
-        
-        // Simple direct translation function
+        // Simple direct translation function with improved error handling
         async function translateText(text, sourceLang, targetLang) {
+            console.log(`Translation requested: ${sourceLang} → ${targetLang}: "${text.substring(0, 30)}${text.length > 30 ? '...' : ''}"`);
+            
             try {
-                return await TranslationService.translate(text, sourceLang, targetLang);
+                const translatedText = await TranslationService.translate(text, sourceLang, targetLang);
+                console.log(`Translation successful: "${translatedText.substring(0, 30)}${translatedText.length > 30 ? '...' : ''}"`);
+                return translatedText;
             } catch (error) {
                 console.error('Translation error:', error);
                 
-                // If all translation services fail, use fallback dictionary translation
-                if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
-                    const fallbackText = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
-                    if (fallbackText !== text.toLowerCase()) {
-                        return fallbackText;
+                // Try fallback methods
+                try {
+                    // If all translation services fail, use fallback dictionary translation
+                    if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                        console.log('Trying fallback dictionary translation');
+                        const fallbackText = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                        if (fallbackText !== text.toLowerCase()) {
+                            console.log(`Fallback translation succeeded: "${fallbackText.substring(0, 30)}${fallbackText.length > 30 ? '...' : ''}"`);
+                            return fallbackText;
+                        }
                     }
+                    
+                    // Try word-by-word translation as a last resort
+                    const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
+                    if (wordByWordResult !== text) {
+                        console.log(`Word-by-word translation succeeded: "${wordByWordResult.substring(0, 30)}${wordByWordResult.length > 30 ? '...' : ''}"`);
+                        return wordByWordResult;
+                    }
+                } catch (fallbackError) {
+                    console.error('Fallback translation failed:', fallbackError);
                 }
                 
                 // If all fails, just return the original text
+                console.log('All translation methods failed, using original text');
                 return text;
             }
         }
@@ -1727,6 +1847,83 @@
             setTimeout(() => {
                 errorNotification.style.display = 'none';
             }, 5000);
+        }
+        
+        // Setup audio visualization for recording feedback
+        function startAudioVisualization() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                console.warn("getUserMedia not supported in this browser");
+                return;
+            }
+            
+            try {
+                // Stop any existing audio context
+                stopAudioVisualization();
+                
+                // Request microphone access
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(stream => {
+                        // Create audio context
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        audioAnalyser = audioContext.createAnalyser();
+                        microphoneStream = audioContext.createMediaStreamSource(stream);
+                        
+                        // Connect nodes
+                        microphoneStream.connect(audioAnalyser);
+                        
+                        // Set up analyser
+                        audioAnalyser.fftSize = 256;
+                        const bufferLength = audioAnalyser.frequencyBinCount;
+                        const dataArray = new Uint8Array(bufferLength);
+                        
+                        // Start visualization loop
+                        function updateVisualization() {
+                            if (!isRecording) {
+                                stopAudioVisualization();
+                                return;
+                            }
+                            
+                            audioAnalyser.getByteFrequencyData(dataArray);
+                            
+                            // Calculate average level
+                            let sum = 0;
+                            for (let i = 0; i < bufferLength; i++) {
+                                sum += dataArray[i];
+                            }
+                            const average = sum / bufferLength;
+                            
+                            // Update visual bar (scale to 0-100%)
+                            const levelPercent = Math.min(100, average * 2);
+                            audioLevelBar.style.width = `${levelPercent}%`;
+                            
+                            // Request next frame
+                            requestAnimationFrame(updateVisualization);
+                        }
+                        
+                        updateVisualization();
+                    })
+                    .catch(error => {
+                        console.error("Error accessing microphone:", error);
+                    });
+            } catch (error) {
+                console.error("Error in audio visualization:", error);
+            }
+        }
+        
+        // Stop audio visualization
+        function stopAudioVisualization() {
+            if (audioContext) {
+                try {
+                    audioContext.close();
+                    audioContext = null;
+                } catch (e) {
+                    console.error("Error closing audio context:", e);
+                }
+            }
+            
+            if (audioLevelBar) {
+                audioLevelBar.style.width = '0%';
+            }
         }
         
         // Initialize the app when document is loaded
