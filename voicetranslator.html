@@ -979,9 +979,15 @@
         // Initialize Firebase
         function initFirebase() {
             try {
+                // Clear any previous Firebase instances
+                database = null;
+                
                 if (!firebase.apps.length) {
                     firebase.initializeApp(firebaseConfig);
+                } else {
+                    firebase.app(); // If already initialized, use that one
                 }
+                
                 database = firebase.database();
                 console.log("Firebase initialized successfully");
                 
@@ -995,6 +1001,12 @@
                     if (snap.val() === true) {
                         connectionStatus.className = 'status connected';
                         connectionText.textContent = 'Connected';
+                        
+                        // If we were trying to join but couldn't, enable the join button again
+                        if (!hasJoined && joinButton.disabled) {
+                            joinButton.disabled = false;
+                            joinButton.textContent = 'Join Chat';
+                        }
                     } else {
                         connectionStatus.className = 'status disconnected';
                         connectionText.textContent = 'Disconnected';
@@ -1008,9 +1020,28 @@
                         }
                     }
                 });
+                
+                // Re-enable join button if it was disabled
+                if (joinButton.textContent === 'Joining...') {
+                    joinButton.disabled = false;
+                    joinButton.textContent = 'Join Chat';
+                }
+                
+                // Set a flag that Firebase is ready
+                window.firebaseReady = true;
+                
+                return true;
             } catch (error) {
                 console.error("Firebase initialization error:", error);
                 showError(`Failed to initialize Firebase: ${error.message}`);
+                
+                // Re-enable join button if it was disabled
+                if (joinButton.textContent === 'Joining...') {
+                    joinButton.disabled = false;
+                    joinButton.textContent = 'Join Chat';
+                }
+                
+                return false;
             }
         }
         
@@ -1117,65 +1148,81 @@
                 return;
             }
             
-            try {
-                // Reference to the room
-                roomRef = database.ref(`rooms/${roomId}`);
-                
-                // Create references
-                messagesRef = roomRef.child('messages');
-                participantsRef = roomRef.child('participants');
-                userRef = participantsRef.child(userId);
-                
-                // Add user to participants
-                userRef.set({
-                    username: username,
-                    language: myLanguageSelect.value,
-                    joinedAt: firebase.database.ServerValue.TIMESTAMP,
-                    lastActive: firebase.database.ServerValue.TIMESTAMP
-                })
-                .then(() => {
-                    console.log("Successfully added user to participants");
-                    
-                    // Remove user when disconnected
-                    userRef.onDisconnect().remove();
-                    
-                    // Set up listeners
-                    setupMessageListener();
-                    setupParticipantsListener();
-                    
-                    // Enable controls
-                    recordButton.disabled = false;
-                    myLanguageSelect.disabled = false;
-                    
-                    // Disable join controls
-                    usernameInput.disabled = true;
-                    joinButton.disabled = true;
-                    joinButton.textContent = 'Joined';
-                    
-                    // Update status
-                    hasJoined = true;
-                    recordingStatus.textContent = 'Click to start recording';
-                    
-                    // Add system message to Firebase
-                    const joinMessage = {
-                        type: 'system',
-                        text: `${username} has joined the chat`,
-                        timestamp: firebase.database.ServerValue.TIMESTAMP
-                    };
-                    
-                    return messagesRef.push(joinMessage);
-                })
-                .then(() => {
-                    console.log("Successfully added join message");
-                })
-                .catch(error => {
-                    console.error("Error joining room:", error);
-                    showError(`Failed to join chat: ${error.message}`);
-                });
-            } catch (error) {
-                console.error("Exception in joinRoom:", error);
-                showError(`Error joining chat: ${error.message}`);
+            if (!database) {
+                showError('Database not initialized. Please refresh the page and try again.');
+                // Try to reinitialize Firebase
+                initFirebase();
+                return;
             }
+            
+            // Disable the join button to prevent multiple clicks
+            joinButton.disabled = true;
+            joinButton.textContent = 'Joining...';
+            
+            // Reference to the room
+            roomRef = database.ref(`rooms/${roomId}`);
+            
+            // Create references
+            messagesRef = roomRef.child('messages');
+            participantsRef = roomRef.child('participants');
+            userRef = participantsRef.child(userId);
+            
+            console.log("Adding user to participants");
+            
+            // Add user to participants
+            userRef.set({
+                username: username,
+                language: myLanguageSelect.value,
+                joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                lastActive: firebase.database.ServerValue.TIMESTAMP
+            }, (error) => {
+                if (error) {
+                    console.error("Error adding user to participants:", error);
+                    showError(`Failed to join: ${error.message}`);
+                    joinButton.disabled = false;
+                    joinButton.textContent = 'Join Chat';
+                    return;
+                }
+                
+                console.log("Successfully added user to participants");
+                
+                // Remove user when disconnected
+                userRef.onDisconnect().remove();
+                
+                // Set up listeners
+                setupMessageListener();
+                setupParticipantsListener();
+                
+                // Enable controls
+                recordButton.disabled = false;
+                myLanguageSelect.disabled = false;
+                
+                // Disable join controls
+                usernameInput.disabled = true;
+                joinButton.textContent = 'Joined';
+                
+                // Update status
+                hasJoined = true;
+                recordingStatus.textContent = 'Click to start recording';
+                
+                // Add system message to Firebase
+                console.log("Adding join message");
+                
+                const joinMessage = {
+                    type: 'system',
+                    text: `${username} has joined the chat`,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                };
+                
+                messagesRef.push(joinMessage, (error) => {
+                    if (error) {
+                        console.error("Error adding join message:", error);
+                        // Not a critical error, user has already joined
+                    } else {
+                        console.log("Successfully added join message");
+                    }
+                });
+            });
         }
         
         // Listen for new messages
@@ -2271,8 +2318,10 @@
             }
         }
         
-        // Initialize the app when document is loaded
-        document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', function() {
+            // Initialize the app with a small delay to ensure all DOM elements are ready
+            setTimeout(init, 100);
+        });
     </script>
 </body>
 </html>
