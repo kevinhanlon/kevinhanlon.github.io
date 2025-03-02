@@ -354,6 +354,7 @@
         let isConnected = false;
         let isListening = false;
         let yourName = '';
+        let connectionReady = false;
         
         // Helper to generate a 6-digit conversation ID
         function generateShortId() {
@@ -464,6 +465,23 @@
             isConnected = connected;
             connectionIndicator.className = 'status-indicator ' + (connected ? 'connected' : 'disconnected');
             connectionStatus.textContent = message || (connected ? 'Connected' : 'Disconnected');
+            
+            // Update speak button state based on connection status
+            updateSpeakButtonState();
+        }
+        
+        // New function to update speak button state
+        function updateSpeakButtonState() {
+            if (connectionReady && isConnected) {
+                speakButton.disabled = false;
+                speakButton.textContent = "Hold to Speak";
+            } else if (isConnected) {
+                speakButton.disabled = true;
+                speakButton.textContent = "Connecting data channel...";
+            } else {
+                speakButton.disabled = true;
+                speakButton.textContent = "Waiting for connection...";
+            }
         }
         
         // Set up WebRTC
@@ -587,6 +605,8 @@
         function setupDataChannel(channel) {
             channel.onopen = () => {
                 console.log("Data channel opened");
+                connectionReady = true;
+                updateSpeakButtonState();
                 
                 // Send initial information
                 if (channel.readyState === 'open') {
@@ -605,10 +625,29 @@
             
             channel.onclose = () => {
                 console.log("Data channel closed");
+                connectionReady = false;
+                updateSpeakButtonState();
+                
+                // Try to reestablish data channel if connection closed unexpectedly
+                if (isConnected && peerConnection) {
+                    console.log("Attempting to reestablish data channel");
+                    setTimeout(() => {
+                        try {
+                            if (peerConnection.connectionState === 'connected') {
+                                dataChannel = peerConnection.createDataChannel('translator');
+                                setupDataChannel(dataChannel);
+                            }
+                        } catch (e) {
+                            console.error("Error recreating data channel:", e);
+                        }
+                    }, 2000); // Wait 2 seconds before trying to reconnect
+                }
             };
             
             channel.onerror = (error) => {
                 console.error("Data channel error:", error);
+                connectionReady = false;
+                updateSpeakButtonState();
             };
             
             channel.onmessage = (event) => {
@@ -1014,6 +1053,12 @@
         
         // Start listening for speech
         function startListening() {
+            // Check if connection is ready before starting recognition
+            if (!connectionReady) {
+                showError("Cannot speak yet - waiting for connection to be established");
+                return;
+            }
+            
             if (!recognition && !setupSpeechRecognition()) {
                 return;
             }
@@ -1045,6 +1090,8 @@
         // Create a new conversation
         function createConversation() {
             isInitiator = true;
+            connectionReady = false; // Reset connection ready state
+            updateSpeakButtonState(); // Update UI
             
             // Set initial language from setup
             yourLanguageInConvo.value = yourLanguageSelect.value;
@@ -1059,6 +1106,9 @@
         
         // Join an existing conversation
         function joinConversation(inputId) {
+            connectionReady = false; // Reset connection ready state
+            updateSpeakButtonState(); // Update UI
+            
             try {
                 // Check if it's a 6-digit ID or legacy encoded data
                 if (/^\d{6}$/.test(inputId)) {
