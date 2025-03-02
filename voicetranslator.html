@@ -527,7 +527,7 @@
         let audioAnalyser = null;
         let microphoneStream = null;
         
-        // Get ssupported languages from each LibreTranslate instance
+        // Get supported languages from each LibreTranslate instance
         let supportedLanguagePairs = [];
         
         async function checkTranslationServices() {
@@ -977,34 +977,40 @@
         
         // Initialize Firebase
         function initFirebase() {
-            if (!firebase.apps.length) {
-                firebase.initializeApp(firebaseConfig);
-            }
-            database = firebase.database();
-            
-            // Update connection status
-            connectionStatus.className = 'status connecting';
-            connectionText.textContent = 'Connecting...';
-            
-            // Check connection status
-            const connectedRef = database.ref('.info/connected');
-            connectedRef.on('value', (snap) => {
-                if (snap.val() === true) {
-                    connectionStatus.className = 'status connected';
-                    connectionText.textContent = 'Connected';
-                } else {
-                    connectionStatus.className = 'status disconnected';
-                    connectionText.textContent = 'Disconnected';
-                    
-                    // Attempt to reconnect if disconnected and we're already joined
-                    if (hasJoined) {
-                        setTimeout(() => {
-                            console.log('Attempting to reconnect to Firebase...');
-                            reconnectFirebase();
-                        }, 3000);
-                    }
+            try {
+                if (!firebase.apps.length) {
+                    firebase.initializeApp(firebaseConfig);
                 }
-            });
+                database = firebase.database();
+                console.log("Firebase initialized successfully");
+                
+                // Update connection status
+                connectionStatus.className = 'status connecting';
+                connectionText.textContent = 'Connecting...';
+                
+                // Check connection status
+                const connectedRef = database.ref('.info/connected');
+                connectedRef.on('value', (snap) => {
+                    if (snap.val() === true) {
+                        connectionStatus.className = 'status connected';
+                        connectionText.textContent = 'Connected';
+                    } else {
+                        connectionStatus.className = 'status disconnected';
+                        connectionText.textContent = 'Disconnected';
+                        
+                        // Attempt to reconnect if disconnected and we're already joined
+                        if (hasJoined) {
+                            setTimeout(() => {
+                                console.log('Attempting to reconnect to Firebase...');
+                                reconnectFirebase();
+                            }, 3000);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Firebase initialization error:", error);
+                showError(`Failed to initialize Firebase: ${error.message}`);
+            }
         }
         
         // Reconnect to Firebase if disconnected
@@ -1057,7 +1063,7 @@
         }
         
         // Initialize the app
-        async function init() {
+        function init() {
             // Generate a random user ID
             userId = generateId();
             
@@ -1077,14 +1083,11 @@
             // Set share URL
             shareUrlInput.value = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
             
-            // Check available translation services
-            try {
-                await checkTranslationServices();
-                console.log(`${supportedLanguagePairs.length} translation language pairs available`);
-            } catch (error) {
+            // Check available translation services in the background
+            checkTranslationServices().catch(error => {
                 console.warn('Failed to check translation services:', error);
                 // Continue anyway, we have fallbacks
-            }
+            });
             
             // Initialize Firebase
             initFirebase();
@@ -1105,6 +1108,7 @@
         
         // Join the chat room
         function joinRoom() {
+            console.log("Join button clicked");
             username = usernameInput.value.trim();
             
             if (username === '') {
@@ -1112,50 +1116,65 @@
                 return;
             }
             
-            // Reference to the room
-            roomRef = database.ref(`rooms/${roomId}`);
-            
-            // Create references
-            messagesRef = roomRef.child('messages');
-            participantsRef = roomRef.child('participants');
-            userRef = participantsRef.child(userId);
-            
-            // Add user to participants
-            userRef.set({
-                username: username,
-                language: myLanguageSelect.value,
-                joinedAt: firebase.database.ServerValue.TIMESTAMP,
-                lastActive: firebase.database.ServerValue.TIMESTAMP
-            });
-            
-            // Remove user when disconnected
-            userRef.onDisconnect().remove();
-            
-            // Set up listeners
-            setupMessageListener();
-            setupParticipantsListener();
-            
-            // Enable controls
-            recordButton.disabled = false;
-            myLanguageSelect.disabled = false;
-            
-            // Disable join controls
-            usernameInput.disabled = true;
-            joinButton.disabled = true;
-            joinButton.textContent = 'Joined';
-            
-            // Update status
-            hasJoined = true;
-            recordingStatus.textContent = 'Click to start recording';
-            
-            // Add system message to Firebase
-            const joinMessage = {
-                type: 'system',
-                text: `${username} has joined the chat`,
-                timestamp: firebase.database.ServerValue.TIMESTAMP
-            };
-            
-            messagesRef.push(joinMessage);
+            try {
+                // Reference to the room
+                roomRef = database.ref(`rooms/${roomId}`);
+                
+                // Create references
+                messagesRef = roomRef.child('messages');
+                participantsRef = roomRef.child('participants');
+                userRef = participantsRef.child(userId);
+                
+                // Add user to participants
+                userRef.set({
+                    username: username,
+                    language: myLanguageSelect.value,
+                    joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                    lastActive: firebase.database.ServerValue.TIMESTAMP
+                })
+                .then(() => {
+                    console.log("Successfully added user to participants");
+                    
+                    // Remove user when disconnected
+                    userRef.onDisconnect().remove();
+                    
+                    // Set up listeners
+                    setupMessageListener();
+                    setupParticipantsListener();
+                    
+                    // Enable controls
+                    recordButton.disabled = false;
+                    myLanguageSelect.disabled = false;
+                    
+                    // Disable join controls
+                    usernameInput.disabled = true;
+                    joinButton.disabled = true;
+                    joinButton.textContent = 'Joined';
+                    
+                    // Update status
+                    hasJoined = true;
+                    recordingStatus.textContent = 'Click to start recording';
+                    
+                    // Add system message to Firebase
+                    const joinMessage = {
+                        type: 'system',
+                        text: `${username} has joined the chat`,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    };
+                    
+                    return messagesRef.push(joinMessage);
+                })
+                .then(() => {
+                    console.log("Successfully added join message");
+                })
+                .catch(error => {
+                    console.error("Error joining room:", error);
+                    showError(`Failed to join chat: ${error.message}`);
+                });
+            } catch (error) {
+                console.error("Exception in joinRoom:", error);
+                showError(`Error joining chat: ${error.message}`);
+            }
         }
         
         // Listen for new messages
@@ -2160,12 +2179,18 @@
         
         // Show error notification
         function showError(message) {
+            console.error("Error:", message);
             errorNotification.textContent = message;
             errorNotification.style.display = 'block';
             
             setTimeout(() => {
                 errorNotification.style.display = 'none';
             }, 5000);
+        }
+        
+        // Check if Firebase is initialized
+        function isFirebaseInitialized() {
+            return database !== null;
         }
         
         // Setup audio visualization for recording feedback
