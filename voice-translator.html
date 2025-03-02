@@ -264,8 +264,17 @@
                     <h3>You (<span id="yourNameDisplay">...</span>)</h3>
                     <div class="language-select">
                         <label for="yourLanguageInConvo">Speaking:</label>
-                        <select id="yourLanguageInConvo" disabled>
+                        <select id="yourLanguageInConvo">
                             <option value="en-US">English</option>
+                            <option value="es-ES">Spanish</option>
+                            <option value="fr-FR">French</option>
+                            <option value="de-DE">German</option>
+                            <option value="it-IT">Italian</option>
+                            <option value="ja-JP">Japanese</option>
+                            <option value="ko-KR">Korean</option>
+                            <option value="zh-CN">Chinese (Simplified)</option>
+                            <option value="ru-RU">Russian</option>
+                            <option value="pt-BR">Portuguese</option>
                         </select>
                     </div>
                     <button id="speakButton" class="speak-button">
@@ -482,11 +491,7 @@
                 
                 // Send initial information
                 if (channel.readyState === 'open') {
-                    channel.send(JSON.stringify({
-                        type: 'info',
-                        name: yourName,
-                        language: yourLanguageSelect.value
-                    }));
+                    sendUserInfo();
                 }
             };
             
@@ -506,6 +511,17 @@
                     console.error("Error parsing message:", e);
                 }
             };
+        }
+        
+        // Send user info to partner
+        function sendUserInfo() {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({
+                    type: 'info',
+                    name: yourName,
+                    language: yourLanguageInConvo.value
+                }));
+            }
         }
         
         // Handle data channel messages
@@ -558,7 +574,7 @@
                     partnerTranscript.scrollTop = partnerTranscript.scrollHeight;
                     
                     // Speak the translation using speech synthesis
-                    speakTranslation(message.translated || message.text, yourLanguageSelect.value);
+                    speakTranslation(message.translated || message.text, yourLanguageInConvo.value);
                     break;
             }
         }
@@ -581,7 +597,7 @@
             recognition = new SpeechRecognition();
             recognition.continuous = false;
             recognition.interimResults = true;
-            recognition.lang = yourLanguageSelect.value;
+            recognition.lang = yourLanguageInConvo.value;
             
             recognition.onresult = (event) => {
                 const transcript = event.results[0][0].transcript;
@@ -627,7 +643,7 @@
                 return;
             }
             
-            const sourceLang = yourLanguageSelect.value.split('-')[0];
+            const sourceLang = yourLanguageInConvo.value.split('-')[0];
             const targetLang = partnerLanguage.value.split('-')[0];
             
             try {
@@ -751,6 +767,19 @@
             }
         }
         
+        // Create a new conversation
+        function createConversation() {
+            isInitiator = true;
+            setupWebRTC(true);
+            
+            // Set initial language from setup
+            yourLanguageInConvo.value = yourLanguageSelect.value;
+            
+            // Show translator interface
+            setupContainer.classList.add('hidden');
+            translatorContainer.classList.remove('hidden');
+        }
+        
         // Join an existing conversation
         function joinConversation(encodedData) {
             try {
@@ -762,6 +791,9 @@
                 
                 isInitiator = false;
                 roomId = encodedData;
+                
+                // Set initial language from setup
+                yourLanguageInConvo.value = yourLanguageSelect.value;
                 
                 // Set partner info if available
                 if (data.name) {
@@ -788,7 +820,7 @@
                             type: 'answer',
                             sdp: peerConnection.localDescription,
                             name: yourName,
-                            language: yourLanguageSelect.value
+                            language: yourLanguageInConvo.value
                         };
                         shareRoomId.value = btoa(JSON.stringify(answerData));
                     })
@@ -807,14 +839,22 @@
             }
         }
         
-        // Create a new conversation
-        function createConversation() {
-            isInitiator = true;
-            setupWebRTC(true);
+        // Get language name from language code
+        function getLangNameFromCode(code) {
+            const languages = {
+                'en-US': 'English',
+                'es-ES': 'Spanish',
+                'fr-FR': 'French',
+                'de-DE': 'German',
+                'it-IT': 'Italian',
+                'ja-JP': 'Japanese',
+                'ko-KR': 'Korean',
+                'zh-CN': 'Chinese (Simplified)',
+                'ru-RU': 'Russian',
+                'pt-BR': 'Portuguese'
+            };
             
-            // Show translator interface
-            setupContainer.classList.add('hidden');
-            translatorContainer.classList.remove('hidden');
+            return languages[code] || code;
         }
         
         // Process received answer from peer
@@ -850,24 +890,6 @@
             }
         }
         
-        // Get language name from language code
-        function getLangNameFromCode(code) {
-            const languages = {
-                'en-US': 'English',
-                'es-ES': 'Spanish',
-                'fr-FR': 'French',
-                'de-DE': 'German',
-                'it-IT': 'Italian',
-                'ja-JP': 'Japanese',
-                'ko-KR': 'Korean',
-                'zh-CN': 'Chinese (Simplified)',
-                'ru-RU': 'Russian',
-                'pt-BR': 'Portuguese'
-            };
-            
-            return languages[code] || code;
-        }
-        
         // Event Listeners
         createRoomBtn.addEventListener('click', () => {
             if (!yourNameInput.value.trim()) {
@@ -877,7 +899,6 @@
             
             yourName = yourNameInput.value.trim();
             yourNameDisplay.textContent = yourName;
-            yourLanguageInConvo.value = yourLanguageSelect.value;
             
             createConversation();
         });
@@ -895,7 +916,6 @@
             
             yourName = yourNameInput.value.trim();
             yourNameDisplay.textContent = yourName;
-            yourLanguageInConvo.value = yourLanguageSelect.value;
             
             joinConversation(roomIdInput.value.trim());
         });
@@ -925,6 +945,17 @@
         speakButton.addEventListener('touchend', (e) => {
             e.preventDefault();
             stopListening();
+        });
+        
+        // Additional event listener for language change during conversation
+        yourLanguageInConvo.addEventListener('change', () => {
+            // Update speech recognition language
+            if (recognition) {
+                recognition.lang = yourLanguageInConvo.value;
+            }
+            
+            // Inform partner about language change
+            sendUserInfo();
         });
         
         // For testing/demo purposes - process an answer from the text field
