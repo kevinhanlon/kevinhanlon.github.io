@@ -312,6 +312,13 @@
                     <input type="text" id="shareRoomId" readonly>
                     <button id="copyLinkBtn">Copy</button>
                 </div>
+                <div class="connection-info" style="margin-top: 10px;">
+                    <button id="showUrlBtn">Show Direct URL Link</button>
+                </div>
+                <div id="directUrlContainer" class="connection-info" style="margin-top: 10px; display: none;">
+                    <input type="text" id="directShareUrl" readonly>
+                    <button id="copyDirectUrlBtn">Copy URL</button>
+                </div>
             </div>
         </div>
     </div>
@@ -406,6 +413,33 @@
                 console.error("Error retrieving session data:", error);
                 return null;
             }
+        }
+        
+        // NEW: Generate shareable URL with embedded data
+        function generateShareableUrl(data) {
+            // Compress and encode the data for URL
+            const encodedData = btoa(JSON.stringify(data));
+            // Create URL with data parameter
+            const url = new URL(window.location.href);
+            url.search = ''; // Clear existing parameters
+            url.searchParams.set('data', encodedData);
+            return url.toString();
+        }
+        
+        // NEW: Extract data from URL if present
+        function getDataFromUrl() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const encodedData = urlParams.get('data');
+            
+            if (encodedData) {
+                try {
+                    return JSON.parse(atob(encodedData));
+                } catch (error) {
+                    console.error("Error parsing data from URL:", error);
+                    return null;
+                }
+            }
+            return null;
         }
         
         // Clean up old session data
@@ -585,13 +619,40 @@
                         };
                         
                         // Store in localStorage
-                        if (storeSessionData(shortId, sessionData)) {
+                        const storedLocally = storeSessionData(shortId, sessionData);
+                        
+                        if (storedLocally) {
                             // Display the short ID for sharing
                             shareRoomId.value = shortId;
+                            
+                            // Also create a direct share URL as backup
+                            const shareUrl = generateShareableUrl(sessionData);
+                            console.log("Direct share URL created as backup:", shareUrl);
+                            
+                            // Store this URL for easy access
+                            window.directShareUrl = shareUrl;
                         } else {
-                            // Fallback to the old method if localStorage fails
-                            shareRoomId.value = btoa(JSON.stringify(sessionData));
-                            showError("Could not store session data locally. Using legacy ID.");
+                            // Fallback to URL sharing if localStorage fails
+                            const shareUrl = generateShareableUrl(sessionData);
+                            shareRoomId.value = shortId + " (localStorage failed - use share URL)";
+                            window.directShareUrl = shareUrl;
+                            
+                            // Show a button to copy the direct share URL
+                            document.getElementById('copyLinkBtn').textContent = "Copy Share URL";
+                            document.getElementById('copyLinkBtn').onclick = function() {
+                                // Copy the URL instead of the ID
+                                navigator.clipboard.writeText(shareUrl)
+                                    .then(() => {
+                                        const originalText = this.textContent;
+                                        this.textContent = 'URL Copied!';
+                                        setTimeout(() => {
+                                            this.textContent = originalText;
+                                        }, 2000);
+                                    });
+                                return false;
+                            };
+                            
+                            showError("LocalStorage unavailable. Using URL sharing instead.");
                         }
                     })
                     .catch(error => {
@@ -1110,7 +1171,16 @@
             updateSpeakButtonState(); // Update UI
             
             try {
-                // Check if it's a 6-digit ID or legacy encoded data
+                // First check if there's data in the URL (highest priority)
+                const urlData = getDataFromUrl();
+                if (urlData) {
+                    console.log("Found conversation data in URL parameters");
+                    roomId = "url_data";
+                    handleJoinData(urlData);
+                    return;
+                }
+                
+                // Then check if it's a 6-digit ID or legacy encoded data
                 if (/^\d{6}$/.test(inputId)) {
                     // It's a 6-digit ID
                     const sessionData = getSessionData(inputId);
@@ -1121,11 +1191,30 @@
                     
                     roomId = inputId;
                     handleJoinData(sessionData);
+                } else if (inputId.startsWith('http')) {
+                    // It's a shared URL - extract the data parameter
+                    try {
+                        const url = new URL(inputId);
+                        const encodedData = url.searchParams.get('data');
+                        if (encodedData) {
+                            const data = JSON.parse(atob(encodedData));
+                            roomId = "shared_url";
+                            handleJoinData(data);
+                        } else {
+                            throw new Error("No data found in shared URL");
+                        }
+                    } catch (urlError) {
+                        throw new Error("Invalid shared URL: " + urlError.message);
+                    }
                 } else {
                     // Try legacy format (base64 encoded)
-                    const data = JSON.parse(atob(inputId));
-                    roomId = inputId;
-                    handleJoinData(data);
+                    try {
+                        const data = JSON.parse(atob(inputId));
+                        roomId = inputId;
+                        handleJoinData(data);
+                    } catch (parseError) {
+                        throw new Error("Invalid format: " + parseError.message);
+                    }
                 }
             } catch (error) {
                 showError("Invalid conversation ID: " + error.message);
@@ -1337,13 +1426,82 @@
             }
         });
         
-        // Check for a room ID in the URL when the page loads
+        // NEW: Handle Direct URL sharing
+        const showUrlBtn = document.getElementById('showUrlBtn');
+        const directUrlContainer = document.getElementById('directUrlContainer');
+        const directShareUrl = document.getElementById('directShareUrl');
+        const copyDirectUrlBtn = document.getElementById('copyDirectUrlBtn');
+        
+        showUrlBtn.addEventListener('click', () => {
+            if (directUrlContainer.style.display === 'none') {
+                // Only show if we have the URL
+                if (window.directShareUrl) {
+                    directShareUrl.value = window.directShareUrl;
+                    directUrlContainer.style.display = 'flex';
+                    showUrlBtn.textContent = 'Hide Direct URL';
+                } else {
+                    showError("Direct URL not available yet");
+                }
+            } else {
+                directUrlContainer.style.display = 'none';
+                showUrlBtn.textContent = 'Show Direct URL Link';
+            }
+        });
+        
+        copyDirectUrlBtn.addEventListener('click', () => {
+            directShareUrl.select();
+            document.execCommand('copy');
+            
+            const originalText = copyDirectUrlBtn.textContent;
+            copyDirectUrlBtn.textContent = 'URL Copied!';
+            
+            setTimeout(() => {
+                copyDirectUrlBtn.textContent = originalText;
+            }, 2000);
+        });
+        
+        // Check for a room ID or data in the URL when the page loads
         window.addEventListener('DOMContentLoaded', () => {
             const urlParams = new URLSearchParams(window.location.search);
             const urlRoomId = urlParams.get('room');
             
             if (urlRoomId) {
                 roomIdInput.value = urlRoomId;
+            }
+            
+            // Check if there's data in the URL for auto-joining
+            const urlData = getDataFromUrl();
+            if (urlData) {
+                console.log("Found conversation data in URL - ready to auto-join");
+                // Show a message to the user
+                showError("Ready to join conversation from URL. Enter your name and click 'Join Conversation'");
+                
+                // Auto-fill the room ID field to indicate we'll be using URL data
+                roomIdInput.value = "URL Data Available";
+                
+                // Add an event listener to the join button to use this data
+                const originalJoinHandler = joinRoomBtn.onclick;
+                joinRoomBtn.onclick = function() {
+                    if (!yourNameInput.value.trim()) {
+                        showError("Please enter your name");
+                        return;
+                    }
+                    
+                    yourName = yourNameInput.value.trim();
+                    yourNameDisplay.textContent = yourName;
+                    
+                    // Use the data from URL directly
+                    try {
+                        roomId = "url_data";
+                        handleJoinData(urlData);
+                    } catch (error) {
+                        showError("Error joining: " + error.message);
+                        console.error("Error joining from URL data:", error);
+                        
+                        // Restore original behavior if this fails
+                        if (originalJoinHandler) originalJoinHandler();
+                    }
+                };
             }
             
             // Clean up old session data
