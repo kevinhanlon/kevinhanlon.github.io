@@ -616,8 +616,12 @@
             projectId: "voice-translator-20c5f",
             storageBucket: "voice-translator-20c5f.firebasestorage.app",
             messagingSenderId: "77784867352",
-            appId: "1:77784867352:web:cfd42849e7a87a54ead96d"
+            appId: "1:77784867352:web:cfd42849e7a54ead96d"
         };
+        
+        // Global variable to track initialization attempts
+        let firebaseInitAttempts = 0;
+        const MAX_INIT_ATTEMPTS = 3;
         
         // Enhanced multi-service translation system
         const TranslationService = {
@@ -683,10 +687,10 @@
                         source: from,
                         target: to,
                         format: "text"
+
                     }),
                     responseHandler: (response) => response.json().then(data => data.translatedText)
                 }
-            ],
             ],
             
             // Translation cache with expiration
@@ -969,12 +973,31 @@
         // Initialize Firebase
         function initFirebase() {
             try {
+                firebaseInitAttempts++;
+                console.log(`Firebase initialization attempt ${firebaseInitAttempts}/${MAX_INIT_ATTEMPTS}`);
+                
+                // Check if Firebase SDK is loaded
+                if (typeof firebase === 'undefined') {
+                    console.error("Firebase SDK is not loaded. Check network connections and script tags.");
+                    showError("Firebase SDK not loaded. Check your internet connection and try again.");
+                    
+                    // Try reloading Firebase scripts
+                    if (firebaseInitAttempts < MAX_INIT_ATTEMPTS) {
+                        console.log("Attempting to reload Firebase SDK...");
+                        reloadFirebaseScripts();
+                        return false;
+                    }
+                    return false;
+                }
+                
                 // Clear any previous Firebase instances
                 database = null;
                 
                 if (!firebase.apps.length) {
+                    console.log("Initializing new Firebase app instance");
                     firebase.initializeApp(firebaseConfig);
                 } else {
+                    console.log("Using existing Firebase app instance");
                     firebase.app(); // If already initialized, use that one
                 }
                 
@@ -1019,20 +1042,50 @@
                 
                 // Set a flag that Firebase is ready
                 window.firebaseReady = true;
+                firebaseInitAttempts = 0; // Reset counter on success
                 
                 return true;
             } catch (error) {
                 console.error("Firebase initialization error:", error);
-                showError(`Failed to initialize Firebase: ${error.message}`);
+                showError(`Failed to initialize Firebase: ${error.message}. Check browser console for details.`);
                 
-                // Re-enable join button if it was disabled
-                if (joinButton.textContent === 'Joining...') {
-                    joinButton.disabled = false;
-                    joinButton.textContent = 'Join Chat';
+                // Try again if under max attempts
+                if (firebaseInitAttempts < MAX_INIT_ATTEMPTS) {
+                    console.log(`Will retry Firebase initialization in 3 seconds (attempt ${firebaseInitAttempts}/${MAX_INIT_ATTEMPTS})`);
+                    setTimeout(initFirebase, 3000);
+                } else {
+                    console.error(`Failed to initialize Firebase after ${MAX_INIT_ATTEMPTS} attempts`);
+                    showError(`Failed to initialize Firebase after multiple attempts. Please reload the page or check your internet connection.`);
                 }
-                
                 return false;
             }
+        }
+        
+        // Function to reload Firebase scripts dynamically
+        function reloadFirebaseScripts() {
+            console.log("Reloading Firebase scripts...");
+            
+            const loadScript = (src) => {
+                return new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = src;
+                    script.onload = () => resolve();
+                    script.onerror = (e) => reject(e);
+                    document.head.appendChild(script);
+                });
+            };
+            
+            // Load Firebase scripts in sequence
+            loadScript("https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js")
+                .then(() => loadScript("https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"))
+                .then(() => {
+                    console.log("Firebase scripts reloaded successfully");
+                    setTimeout(initFirebase, 1000); // Try initialization again after scripts load
+                })
+                .catch((error) => {
+                    console.error("Failed to reload Firebase scripts:", error);
+                    showError("Failed to load Firebase scripts. Please check your internet connection and try again.");
+                });
         }
         
         // Reconnect to Firebase if disconnected
@@ -1239,78 +1292,67 @@
                 
                 console.log("Adding user to participants");
                 
-                // Check connection before adding user
-                database.ref('.info/connected').once('value')
-                    .then((snapshot) => {
-                        const connected = snapshot.val();
-                        console.log("Firebase connection status:", connected);
-                        
-                        if (!connected) {
-                            throw new Error("Not connected to Firebase. Please check your internet connection.");
-                        }
-                        
-                        // Add user to participants
-                        return userRef.set({
-                            username: username,
-                            language: myLanguageSelect.value,
-                            joinedAt: firebase.database.ServerValue.TIMESTAMP,
-                            lastActive: firebase.database.ServerValue.TIMESTAMP
-                        });
-                    })
-                    .then(() => {
-                        console.log("Successfully added user to participants");
-                        
-                        // Remove user when disconnected
-                        userRef.onDisconnect().remove();
-                        
-                        // Set up listeners
-                        setupMessageListener();
-                        setupParticipantsListener();
-                        
-                        // Enable controls
-                        if (recordButton) recordButton.disabled = false;
-                        if (myLanguageSelect) myLanguageSelect.disabled = false;
-                        
-                        // Disable join controls
-                        if (usernameInput) usernameInput.disabled = true;
-                        if (joinButton) {
-                            joinButton.disabled = true;
-                            joinButton.textContent = 'Joined';
-                        }
-                        
-                        // Update status
-                        hasJoined = true;
-                        if (recordingStatus) recordingStatus.textContent = 'Click to start recording';
-                        
-                        // Add system message to Firebase
-                        const joinMessage = {
-                            type: 'system',
-                            text: `${username} has joined the chat`,
-                            timestamp: firebase.database.ServerValue.TIMESTAMP
-                        };
-                        
-                        return messagesRef.push(joinMessage);
-                    })
-                    .then(() => {
-                        console.log("Join complete - added user and system message");
-                        
-                        // Add first welcome message to the chat window
-                        addSystemMessageToUI({
-                            type: 'system',
-                            text: `Welcome to the chat, ${username}! Click the microphone button to start speaking.`
-                        });
-                    })
-                    .catch((error) => {
-                        console.error("Error in join process:", error);
-                        
-                        // Re-enable join button on error
-                        if (joinButton) {
-                            joinButton.disabled = false;
-                            joinButton.textContent = 'Join Chat';
-                        }
-                        
-                        showError(`Failed to join: ${error.message}`);
+                // Add user to participants
+                userRef.set({
+                    username: username,
+                    language: myLanguageSelect.value,
+                    joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                    lastActive: firebase.database.ServerValue.TIMESTAMP
+                })
+                .then(() => {
+                    console.log("Successfully added user to participants");
+                    
+                    // Remove user when disconnected
+                    userRef.onDisconnect().remove();
+                    
+                    // Set up listeners
+                    setupMessageListener();
+                    setupParticipantsListener();
+                    
+                    // Enable controls
+                    if (recordButton) recordButton.disabled = false;
+                    if (myLanguageSelect) myLanguageSelect.disabled = false;
+                    
+                    // Disable join controls
+                    if (usernameInput) usernameInput.disabled = true;
+                    if (joinButton) {
+                        joinButton.disabled = true;
+                        joinButton.textContent = 'Joined';
+                    }
+                    
+                    // Update status
+                    hasJoined = true;
+                    if (recordingStatus) recordingStatus.textContent = 'Click to start recording';
+                    
+                    // Add system message to Firebase
+                    const joinMessage = {
+                        type: 'system',
+                        text: `${username} has joined the chat`,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    };
+                    
+                    return messagesRef.push(joinMessage);
+                })
+                .then(() => {
+                    console.log("Join complete - added user and system message");
+                    
+                    // Add first welcome message to the chat window
+                    addSystemMessageToUI({
+                        type: 'system',
+                        text: `Welcome to the chat, ${username}! Click the microphone button to start speaking.`
                     });
+                })
+                .catch((error) => {
+                    console.error("Error in join process:", error);
+                    
+                    // Re-enable join button on error
+                    if (joinButton) {
+                        joinButton.disabled = false;
+                        joinButton.textContent = 'Join Chat';
+                    }
+                    
+                    showError(`Failed to join: ${error.message}`);
+                });
             } catch (error) {
                 console.error("Exception in joinRoom:", error);
                 
@@ -2417,18 +2459,36 @@
             }
         }
         
-document.addEventListener('DOMContentLoaded', function() {
+    </script>
+    
+    <!-- Initialize Firebase and start the app -->
+    <script>
+        // Initialize the app when the document is fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
             console.log("DOM content loaded - starting initialization");
             
-            // Add a direct click handler to the join button as a backup
-            const directJoinButton = document.getElementById('joinButton');
-            if (directJoinButton) {
-                console.log("Adding direct join button handler");
-                directJoinButton.onclick = function() {
-                    console.log("Direct join button click detected");
-                    const usernameField = document.getElementById('usernameInput');
-                    if (usernameField && usernameField.value.trim()) {
-                        joinChat(usernameField.value.trim());
+            // Get DOM elements
+            const messagesContainer = document.getElementById('messagesContainer');
+            const recordButton = document.getElementById('recordButton');
+            const recordingStatus = document.getElementById('recordingStatus');
+            const myLanguageSelect = document.getElementById('myLanguage');
+            const shareUrlInput = document.getElementById('shareUrl');
+            const copyButton = document.getElementById('copyButton');
+            const connectionStatus = document.getElementById('connectionStatus');
+            const connectionText = document.getElementById('connectionText');
+            const errorNotification = document.getElementById('errorNotification');
+            const processingIndicator = document.getElementById('processingIndicator');
+            const usernameInput = document.getElementById('username');
+            const joinButton = document.getElementById('joinButton');
+            const participantsList = document.getElementById('participantsList');
+            
+            // Add a direct click handler to the join button
+            if (joinButton) {
+                console.log("Adding join button handler");
+                joinButton.onclick = function() {
+                    console.log("Join button click detected");
+                    if (usernameInput && usernameInput.value.trim()) {
+                        joinChat(usernameInput.value.trim());
                     } else {
                         alert("Please enter your name first");
                     }
@@ -2491,9 +2551,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             };
             
-            // Initialize the app with a small delay to ensure all DOM elements are ready
-            setTimeout(init, 300);
+            // Initialize Firebase - direct approach
+            try {
+                console.log("Calling enhanced Firebase initialization...");
+                // Use the improved initialization function instead of direct initialization
+                initFirebase();
+                
+                // Connection status is now handled in the initFirebase function
+            } catch (e) {
+                console.error("Failed to initialize Firebase directly:", e);
+                showError("Failed to initialize Firebase: " + e.message);
+            }
         });
+    </script>
     </script>
 </body>
 </html>
