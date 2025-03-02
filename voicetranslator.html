@@ -391,6 +391,99 @@
         .recording .audio-level {
             display: block;
         }
+        
+        /* Voice waves animation */
+        @keyframes wave {
+            0% { height: 5px; }
+            50% { height: 20px; }
+            100% { height: 5px; }
+        }
+        
+        /* Room link styles */
+        .room-link-area {
+            margin: 15px 0;
+            padding: 15px;
+            border-radius: 8px;
+            background-color: #f0f8ff;
+            border: 1px solid #b8daff;
+        }
+        
+        .room-link-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .room-link-container p {
+            margin: 0;
+            font-weight: 500;
+        }
+        
+        .room-link-input-group {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .room-link-input-group input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        
+        .room-link-input-group button {
+            padding: 8px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .room-link-input-group button:hover {
+            background-color: #45a049;
+        }
+        
+        .copy-status {
+            color: #4CAF50;
+            font-size: 0.9em;
+            min-height: 1.2em;
+        }
+        
+        /* Status messages */
+        .status-area {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            max-width: 300px;
+        }
+        
+        .status-message {
+            padding: 12px 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            0% { transform: translateX(100%); opacity: 0; }
+            100% { transform: translateX(0); opacity: 1; }
+        }
+        
+        .status-message.success {
+            background-color: #dff2bf;
+            color: #4F8A10;
+            border-left: 4px solid #4F8A10;
+        }
+        
+        .status-message.error {
+            background-color: #ffbaba;
+            color: #D8000C;
+            border-left: 4px solid #D8000C;
+        }
     </style>
 </head>
 <body>
@@ -2379,7 +2472,25 @@
         
         // Check if Firebase is initialized
         function isFirebaseInitialized() {
-            return database !== null;
+            // Check if Firebase global object exists
+            if (typeof firebase === 'undefined') {
+                console.error("Firebase SDK is not loaded");
+                return false;
+            }
+            
+            // Check if a Firebase app is initialized
+            if (!firebase.apps || !firebase.apps.length) {
+                console.error("No Firebase app has been initialized");
+                return false;
+            }
+            
+            // Check if database reference is available
+            if (!database) {
+                console.error("Firebase database reference is not available");
+                return false;
+            }
+            
+            return true;
         }
         
         // Setup audio visualization for recording feedback
@@ -2500,11 +2611,18 @@
                 console.log("joinChat called with name:", name);
                 try {
                     const joinBtn = document.getElementById('joinButton');
-                    if (joinBtn) joinBtn.textContent = "Joining...";
+                    if (joinBtn) {
+                        joinBtn.textContent = "Joining...";
+                        joinBtn.disabled = true;
+                    }
                     
                     if (!firebase || !firebase.database) {
                         console.error("Firebase not initialized");
-                        alert("Connection error. Please refresh the page.");
+                        showError("Connection error. Firebase is not initialized. Please refresh the page.");
+                        if (joinBtn) {
+                            joinBtn.textContent = "Join Chat";
+                            joinBtn.disabled = false;
+                        }
                         return;
                     }
                     
@@ -2512,6 +2630,10 @@
                     const urlParams = new URLSearchParams(window.location.search);
                     const roomId = urlParams.get('room') || Date.now().toString(36);
                     const userId = Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
+                    
+                    // Save these values globally
+                    window.currentRoomId = roomId;
+                    window.currentUserId = userId;
                     
                     const userRef = db.ref(`rooms/${roomId}/participants/${userId}`);
                     const langSelect = document.getElementById('myLanguage');
@@ -2532,24 +2654,196 @@
                         });
                     })
                     .then(() => {
-                        // Refresh page with the room ID
+                        // Show success message and room info
+                        showSuccess(`Successfully joined room: ${roomId}`);
+                        
+                        // Create and display the room URL
+                        const fullRoomUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+                        displayRoomLink(fullRoomUrl);
+                        
+                        // Update URL without reloading the page
                         if (!urlParams.get('room')) {
-                            window.location.href = `${window.location.pathname}?room=${roomId}`;
-                        } else {
-                            window.location.reload();
+                            const newUrl = `${window.location.pathname}?room=${roomId}`;
+                            window.history.pushState({ path: newUrl }, '', newUrl);
                         }
+                        
+                        // Set up room listeners and UI
+                        setupRoomListeners(db, roomId, userId);
+                        
+                        // Change UI to show we're in a room
+                        const joinArea = document.getElementById('joinArea');
+                        const chatArea = document.getElementById('chatArea');
+                        
+                        if (joinArea) joinArea.style.display = 'none';
+                        if (chatArea) chatArea.style.display = 'block';
+                        
+                        // Set global joined flag
+                        window.hasJoined = true;
                     })
                     .catch(error => {
                         console.error("Error in direct join:", error);
-                        alert("Failed to join: " + error.message);
+                        showError(`Failed to join: ${error.message}`);
                         const joinBtn = document.getElementById('joinButton');
-                        if (joinBtn) joinBtn.textContent = "Join Chat";
+                        if (joinBtn) {
+                            joinBtn.textContent = "Join Chat";
+                            joinBtn.disabled = false;
+                        }
                     });
                 } catch (e) {
                     console.error("Exception in direct join:", e);
-                    alert("Error joining: " + e.message);
+                    showError(`Error joining: ${e.message}`);
+                    const joinBtn = document.getElementById('joinButton');
+                    if (joinBtn) {
+                        joinBtn.textContent = "Join Chat";
+                        joinBtn.disabled = false;
+                    }
                 }
             };
+            
+            // Display and make the room link copyable
+            function displayRoomLink(roomUrl) {
+                console.log("Room link:", roomUrl);
+                
+                // Create room link area if it doesn't exist
+                let roomLinkArea = document.getElementById('roomLinkArea');
+                if (!roomLinkArea) {
+                    roomLinkArea = document.createElement('div');
+                    roomLinkArea.id = 'roomLinkArea';
+                    roomLinkArea.className = 'room-link-area';
+                    
+                    const chatHeader = document.querySelector('.chat-header') || document.body;
+                    chatHeader.appendChild(roomLinkArea);
+                }
+                
+                roomLinkArea.innerHTML = `
+                    <div class="room-link-container">
+                        <p>Share this link with others to join this room:</p>
+                        <div class="room-link-input-group">
+                            <input type="text" id="roomLinkInput" value="${roomUrl}" readonly />
+                            <button id="copyLinkBtn">Copy</button>
+                        </div>
+                        <p id="copyStatus" class="copy-status"></p>
+                    </div>
+                `;
+                
+                // Add copy functionality
+                const copyBtn = document.getElementById('copyLinkBtn');
+                const roomLinkInput = document.getElementById('roomLinkInput');
+                const copyStatus = document.getElementById('copyStatus');
+                
+                if (copyBtn && roomLinkInput) {
+                    copyBtn.addEventListener('click', () => {
+                        roomLinkInput.select();
+                        document.execCommand('copy');
+                        
+                        if (copyStatus) {
+                            copyStatus.textContent = 'Link copied!';
+                            setTimeout(() => {
+                                copyStatus.textContent = '';
+                            }, 2000);
+                        }
+                    });
+                }
+            }
+            
+            // Set up Firebase listeners for the room
+            function setupRoomListeners(db, roomId, userId) {
+                // Set up message listener
+                const messagesRef = db.ref(`rooms/${roomId}/messages`);
+                messagesRef.on('child_added', (snapshot) => {
+                    const message = snapshot.val();
+                    // Handle new message (display in UI)
+                    displayMessage(message);
+                });
+                
+                // Set up participants listener
+                const participantsRef = db.ref(`rooms/${roomId}/participants`);
+                participantsRef.on('value', (snapshot) => {
+                    const participants = snapshot.val() || {};
+                    // Update participants list in UI
+                    updateParticipantsList(participants);
+                });
+            }
+            
+            // Display a message in the chat UI
+            function displayMessage(message) {
+                const chatMessages = document.getElementById('chatMessages');
+                if (!chatMessages) return;
+                
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${message.type || 'user'}`;
+                
+                if (message.type === 'system') {
+                    messageDiv.innerHTML = `<div class="message-content system-message">${message.text}</div>`;
+                } else {
+                    const time = new Date(message.timestamp || Date.now()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    messageDiv.innerHTML = `
+                        <div class="message-sender">${message.sender || 'Unknown'}:</div>
+                        <div class="message-content">${message.text}</div>
+                        <div class="message-time">${time}</div>
+                    `;
+                }
+                
+                chatMessages.appendChild(messageDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+            
+            // Update the participants list in the UI
+            function updateParticipantsList(participants) {
+                const participantsList = document.getElementById('participantsList');
+                if (!participantsList) return;
+                
+                participantsList.innerHTML = '';
+                
+                Object.entries(participants).forEach(([id, data]) => {
+                    const participantItem = document.createElement('div');
+                    participantItem.className = 'participant';
+                    participantItem.innerHTML = `
+                        <span class="participant-name">${data.username}</span>
+                        <span class="participant-language">(${data.language})</span>
+                    `;
+                    participantsList.appendChild(participantItem);
+                });
+            }
+            
+            // Show success message
+            function showSuccess(message) {
+                const statusArea = document.getElementById('statusArea') || createStatusArea();
+                const statusMsg = document.createElement('div');
+                statusMsg.className = 'status-message success';
+                statusMsg.textContent = message;
+                statusArea.appendChild(statusMsg);
+                
+                // Remove after 5 seconds
+                setTimeout(() => {
+                    statusMsg.remove();
+                }, 5000);
+            }
+            
+            // Create a status area if it doesn't exist
+            function createStatusArea() {
+                const statusArea = document.createElement('div');
+                statusArea.id = 'statusArea';
+                statusArea.className = 'status-area';
+                document.body.appendChild(statusArea);
+                return statusArea;
+            }
+            
+            // Show error message (reused from elsewhere)
+            function showError(message) {
+                const statusArea = document.getElementById('statusArea') || createStatusArea();
+                const errorMsg = document.createElement('div');
+                errorMsg.className = 'status-message error';
+                errorMsg.textContent = message;
+                statusArea.appendChild(errorMsg);
+                
+                // Remove after 5 seconds
+                setTimeout(() => {
+                    errorMsg.remove();
+                }, 5000);
+                
+                console.error(message);
+            }
             
             // Initialize Firebase - direct approach
             try {
@@ -2563,7 +2857,6 @@
                 showError("Failed to initialize Firebase: " + e.message);
             }
         });
-    </script>
     </script>
 </body>
 </html>
