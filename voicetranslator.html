@@ -490,21 +490,11 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
     
     <script>
-        // DOM Elements
-        const messagesContainer = document.getElementById('messagesContainer');
-        const recordButton = document.getElementById('recordButton');
-        const recordingStatus = document.getElementById('recordingStatus');
-        const myLanguageSelect = document.getElementById('myLanguage');
-        const shareUrlInput = document.getElementById('shareUrl');
-        const copyButton = document.getElementById('copyButton');
-        const connectionStatus = document.getElementById('connectionStatus');
-        const connectionText = document.getElementById('connectionText');
-        const errorNotification = document.getElementById('errorNotification');
-        const processingIndicator = document.getElementById('processingIndicator');
-        const usernameInput = document.getElementById('username');
-        const joinButton = document.getElementById('joinButton');
-        const participantsList = document.getElementById('participantsList');
-        const audioLevelBar = document.querySelector('.audio-level-bar');
+        // DOM Elements - Get them when needed to ensure they exist
+        let messagesContainer, recordButton, recordingStatus, myLanguageSelect;
+        let shareUrlInput, copyButton, connectionStatus, connectionText;
+        let errorNotification, processingIndicator, usernameInput, joinButton;
+        let participantsList, audioLevelBar;
         
         // Global variables
         let isRecording = false;
@@ -1096,8 +1086,14 @@
         
         // Initialize the app
         function init() {
+            console.log("Initializing app...");
+            
+            // Load all DOM elements to ensure they exist
+            initDOMElements();
+            
             // Generate a random user ID
             userId = generateId();
+            console.log("Generated user ID:", userId);
             
             // Get or create room ID from URL
             const urlParams = new URLSearchParams(window.location.search);
@@ -1111,6 +1107,8 @@
                 const newUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
                 window.history.pushState({ path: newUrl }, '', newUrl);
             }
+            
+            console.log("Room ID:", roomId);
             
             // Set share URL
             shareUrlInput.value = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
@@ -1127,20 +1125,85 @@
             // Set up speech recognition
             setupSpeechRecognition();
             
-            // Add event listeners
-            recordButton.addEventListener('click', toggleRecording);
-            copyButton.addEventListener('click', copyShareUrl);
-            myLanguageSelect.addEventListener('change', updateUserLanguage);
-            joinButton.addEventListener('click', joinRoom);
-            window.addEventListener('beforeunload', leaveRoom);
+            // Bind events directly to ensure they work
+            bindEvents();
             
             // Auto-focus username input
             usernameInput.focus();
+            
+            console.log("App initialization complete");
+        }
+        
+        // Initialize DOM elements
+        function initDOMElements() {
+            console.log("Initializing DOM elements...");
+            
+            messagesContainer = document.getElementById('messagesContainer');
+            recordButton = document.getElementById('recordButton');
+            recordingStatus = document.getElementById('recordingStatus');
+            myLanguageSelect = document.getElementById('myLanguage');
+            shareUrlInput = document.getElementById('shareUrl');
+            copyButton = document.getElementById('copyButton');
+            connectionStatus = document.getElementById('connectionStatus');
+            connectionText = document.getElementById('connectionText');
+            errorNotification = document.getElementById('errorNotification');
+            processingIndicator = document.getElementById('processingIndicator');
+            usernameInput = document.getElementById('username');
+            joinButton = document.getElementById('joinButton');
+            participantsList = document.getElementById('participantsList');
+            audioLevelBar = document.querySelector('.audio-level-bar');
+            
+            // Check if any essential elements are missing
+            const criticalElements = [
+                { name: 'messagesContainer', element: messagesContainer },
+                { name: 'usernameInput', element: usernameInput },
+                { name: 'joinButton', element: joinButton }
+            ];
+            
+            const missingElements = criticalElements.filter(item => !item.element);
+            
+            if (missingElements.length > 0) {
+                console.error("Critical DOM elements missing:", missingElements.map(item => item.name).join(', '));
+                alert(`App initialization error: Missing critical UI elements. Please refresh the page.`);
+            } else {
+                console.log("All critical DOM elements found");
+            }
+        }
+        
+        // Bind all event listeners directly
+        function bindEvents() {
+            console.log("Binding event handlers...");
+            
+            // Direct join button binding (most important)
+            if (joinButton) {
+                console.log("Binding join button click event");
+                // Remove any existing handlers first
+                joinButton.removeEventListener('click', joinRoom);
+                // Add new handler
+                joinButton.addEventListener('click', joinRoom);
+                joinButton.disabled = false;
+            }
+            
+            // Other buttons
+            if (recordButton) recordButton.addEventListener('click', toggleRecording);
+            if (copyButton) copyButton.addEventListener('click', copyShareUrl);
+            if (myLanguageSelect) myLanguageSelect.addEventListener('change', updateUserLanguage);
+            
+            // Add beforeunload handler
+            window.addEventListener('beforeunload', leaveRoom);
         }
         
         // Join the chat room
         function joinRoom() {
             console.log("Join button clicked");
+            
+            // Check if username input exists
+            if (!usernameInput) {
+                console.error("Username input element not found");
+                alert("Error: Username input not found. Please refresh the page.");
+                return;
+            }
+            
             username = usernameInput.value.trim();
             
             if (username === '') {
@@ -1148,81 +1211,117 @@
                 return;
             }
             
+            // Check if Firebase is initialized
             if (!database) {
-                showError('Database not initialized. Please refresh the page and try again.');
+                console.error("Database not initialized");
+                showError('Connection not ready. Please wait a moment and try again.');
                 // Try to reinitialize Firebase
-                initFirebase();
+                setTimeout(initFirebase, 1000);
                 return;
             }
             
-            // Disable the join button to prevent multiple clicks
-            joinButton.disabled = true;
-            joinButton.textContent = 'Joining...';
+            console.log("Joining room with username:", username);
             
-            // Reference to the room
-            roomRef = database.ref(`rooms/${roomId}`);
+            // Update UI to show we're trying to join
+            if (joinButton) {
+                joinButton.disabled = true;
+                joinButton.textContent = 'Joining...';
+            }
             
-            // Create references
-            messagesRef = roomRef.child('messages');
-            participantsRef = roomRef.child('participants');
-            userRef = participantsRef.child(userId);
-            
-            console.log("Adding user to participants");
-            
-            // Add user to participants
-            userRef.set({
-                username: username,
-                language: myLanguageSelect.value,
-                joinedAt: firebase.database.ServerValue.TIMESTAMP,
-                lastActive: firebase.database.ServerValue.TIMESTAMP
-            }, (error) => {
-                if (error) {
-                    console.error("Error adding user to participants:", error);
-                    showError(`Failed to join: ${error.message}`);
+            try {
+                // Reference to the room
+                roomRef = database.ref(`rooms/${roomId}`);
+                
+                // Create references
+                messagesRef = roomRef.child('messages');
+                participantsRef = roomRef.child('participants');
+                userRef = participantsRef.child(userId);
+                
+                console.log("Adding user to participants");
+                
+                // Check connection before adding user
+                database.ref('.info/connected').once('value')
+                    .then((snapshot) => {
+                        const connected = snapshot.val();
+                        console.log("Firebase connection status:", connected);
+                        
+                        if (!connected) {
+                            throw new Error("Not connected to Firebase. Please check your internet connection.");
+                        }
+                        
+                        // Add user to participants
+                        return userRef.set({
+                            username: username,
+                            language: myLanguageSelect.value,
+                            joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                            lastActive: firebase.database.ServerValue.TIMESTAMP
+                        });
+                    })
+                    .then(() => {
+                        console.log("Successfully added user to participants");
+                        
+                        // Remove user when disconnected
+                        userRef.onDisconnect().remove();
+                        
+                        // Set up listeners
+                        setupMessageListener();
+                        setupParticipantsListener();
+                        
+                        // Enable controls
+                        if (recordButton) recordButton.disabled = false;
+                        if (myLanguageSelect) myLanguageSelect.disabled = false;
+                        
+                        // Disable join controls
+                        if (usernameInput) usernameInput.disabled = true;
+                        if (joinButton) {
+                            joinButton.disabled = true;
+                            joinButton.textContent = 'Joined';
+                        }
+                        
+                        // Update status
+                        hasJoined = true;
+                        if (recordingStatus) recordingStatus.textContent = 'Click to start recording';
+                        
+                        // Add system message to Firebase
+                        const joinMessage = {
+                            type: 'system',
+                            text: `${username} has joined the chat`,
+                            timestamp: firebase.database.ServerValue.TIMESTAMP
+                        };
+                        
+                        return messagesRef.push(joinMessage);
+                    })
+                    .then(() => {
+                        console.log("Join complete - added user and system message");
+                        
+                        // Add first welcome message to the chat window
+                        addSystemMessageToUI({
+                            type: 'system',
+                            text: `Welcome to the chat, ${username}! Click the microphone button to start speaking.`
+                        });
+                    })
+                    .catch((error) => {
+                        console.error("Error in join process:", error);
+                        
+                        // Re-enable join button on error
+                        if (joinButton) {
+                            joinButton.disabled = false;
+                            joinButton.textContent = 'Join Chat';
+                        }
+                        
+                        showError(`Failed to join: ${error.message}`);
+                    });
+            } catch (error) {
+                console.error("Exception in joinRoom:", error);
+                
+                // Re-enable join button on error
+                if (joinButton) {
                     joinButton.disabled = false;
                     joinButton.textContent = 'Join Chat';
-                    return;
                 }
                 
-                console.log("Successfully added user to participants");
-                
-                // Remove user when disconnected
-                userRef.onDisconnect().remove();
-                
-                // Set up listeners
-                setupMessageListener();
-                setupParticipantsListener();
-                
-                // Enable controls
-                recordButton.disabled = false;
-                myLanguageSelect.disabled = false;
-                
-                // Disable join controls
-                usernameInput.disabled = true;
-                joinButton.textContent = 'Joined';
-                
-                // Update status
-                hasJoined = true;
-                recordingStatus.textContent = 'Click to start recording';
-                
-                // Add system message to Firebase
-                console.log("Adding join message");
-                
-                const joinMessage = {
-                    type: 'system',
-                    text: `${username} has joined the chat`,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP
-                };
-                
-                messagesRef.push(joinMessage, (error) => {
-                    if (error) {
-                        console.error("Error adding join message:", error);
-                        // Not a critical error, user has already joined
-                    } else {
-                        console.log("Successfully added join message");
-                    }
-                });
-            });
+                showError(`Error joining chat: ${error.message}`);
+            }
         }
         
         // Listen for new messages
@@ -2319,8 +2418,81 @@
         }
         
 document.addEventListener('DOMContentLoaded', function() {
+            console.log("DOM content loaded - starting initialization");
+            
+            // Add a direct click handler to the join button as a backup
+            const directJoinButton = document.getElementById('joinButton');
+            if (directJoinButton) {
+                console.log("Adding direct join button handler");
+                directJoinButton.onclick = function() {
+                    console.log("Direct join button click detected");
+                    const usernameField = document.getElementById('usernameInput');
+                    if (usernameField && usernameField.value.trim()) {
+                        joinChat(usernameField.value.trim());
+                    } else {
+                        alert("Please enter your name first");
+                    }
+                };
+            }
+            
+            // Define a simple join function that works independently
+            window.joinChat = function(name) {
+                console.log("joinChat called with name:", name);
+                try {
+                    const joinBtn = document.getElementById('joinButton');
+                    if (joinBtn) joinBtn.textContent = "Joining...";
+                    
+                    if (!firebase || !firebase.database) {
+                        console.error("Firebase not initialized");
+                        alert("Connection error. Please refresh the page.");
+                        return;
+                    }
+                    
+                    const db = firebase.database();
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const roomId = urlParams.get('room') || Date.now().toString(36);
+                    const userId = Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
+                    
+                    const userRef = db.ref(`rooms/${roomId}/participants/${userId}`);
+                    const langSelect = document.getElementById('myLanguage');
+                    const lang = langSelect ? langSelect.value : 'en';
+                    
+                    userRef.set({
+                        username: name,
+                        language: lang,
+                        joinedAt: firebase.database.ServerValue.TIMESTAMP
+                    })
+                    .then(() => {
+                        console.log("Successfully joined with direct method");
+                        const msgRef = db.ref(`rooms/${roomId}/messages`);
+                        return msgRef.push({
+                            type: 'system',
+                            text: `${name} has joined the chat`,
+                            timestamp: firebase.database.ServerValue.TIMESTAMP
+                        });
+                    })
+                    .then(() => {
+                        // Refresh page with the room ID
+                        if (!urlParams.get('room')) {
+                            window.location.href = `${window.location.pathname}?room=${roomId}`;
+                        } else {
+                            window.location.reload();
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Error in direct join:", error);
+                        alert("Failed to join: " + error.message);
+                        const joinBtn = document.getElementById('joinButton');
+                        if (joinBtn) joinBtn.textContent = "Join Chat";
+                    });
+                } catch (e) {
+                    console.error("Exception in direct join:", e);
+                    alert("Error joining: " + e.message);
+                }
+            };
+            
             // Initialize the app with a small delay to ensure all DOM elements are ready
-            setTimeout(init, 100);
+            setTimeout(init, 300);
         });
     </script>
 </body>
