@@ -753,11 +753,23 @@
                 // Get sorted endpoints based on historical performance
                 const sortedEndpoints = this.getSortedEndpoints();
                 
+                // Reset all endpoints if all have failed
+                const allFailed = sortedEndpoints.every(endpoint => 
+                    (this.endpointStats.failureCounts[endpoint.name] || 0) > 10
+                );
+                
+                if (allFailed) {
+                    console.log('All translation endpoints have high failure counts. Resetting counts.');
+                    sortedEndpoints.forEach(endpoint => {
+                        this.endpointStats.failureCounts[endpoint.name] = 0;
+                    });
+                }
+                
                 // Use a single concurrent request approach to avoid rate limits
                 // Try endpoints one after another with fast timeouts
                 for (const endpoint of sortedEndpoints) {
-                    // Skip endpoints with high failure counts
-                    if (this.endpointStats.failureCounts[endpoint.name] > 5) {
+                    // Skip endpoints with very high failure counts (more lenient now)
+                    if (this.endpointStats.failureCounts[endpoint.name] > 15) {
                         continue;
                     }
                     
@@ -869,8 +881,65 @@
                 } else {
                     connectionStatus.className = 'status disconnected';
                     connectionText.textContent = 'Disconnected';
+                    
+                    // Attempt to reconnect if disconnected and we're already joined
+                    if (hasJoined) {
+                        setTimeout(() => {
+                            console.log('Attempting to reconnect to Firebase...');
+                            reconnectFirebase();
+                        }, 3000);
+                    }
                 }
             });
+        }
+        
+        // Reconnect to Firebase if disconnected
+        function reconnectFirebase() {
+            if (!hasJoined) return;
+            
+            try {
+                // Force reconnect by resetting the database reference
+                database.goOffline();
+                database.goOnline();
+                
+                // Re-establish references
+                roomRef = database.ref(`rooms/${roomId}`);
+                messagesRef = roomRef.child('messages');
+                participantsRef = roomRef.child('participants');
+                userRef = participantsRef.child(userId);
+                
+                // Re-add user to participants if we were previously joined
+                if (username) {
+                    userRef.set({
+                        username: username,
+                        language: myLanguageSelect.value,
+                        joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                        lastActive: firebase.database.ServerValue.TIMESTAMP
+                    });
+                    
+                    // Remove user when disconnected
+                    userRef.onDisconnect().remove();
+                    
+                    // Re-setup listeners
+                    setupMessageListener();
+                    setupParticipantsListener();
+                    
+                    console.log('Successfully reconnected to Firebase');
+                    
+                    // Add system message about reconnection
+                    const reconnectMessage = {
+                        type: 'system',
+                        text: `${username} has reconnected to the chat`,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    };
+                    
+                    messagesRef.push(reconnectMessage);
+                }
+            } catch (error) {
+                console.error('Error reconnecting to Firebase:', error);
+                // Try again after a delay
+                setTimeout(reconnectFirebase, 5000);
+            }
         }
         
         // Initialize the app
@@ -1067,7 +1136,7 @@
             });
         }
         
-        // Improved translation handler with timeouts
+        // Improved translation handler with timeouts and retry mechanism
         function translateMessageForUser(message) {
             const sourceLang = message.language;
             const targetLang = myLanguageSelect.value;
@@ -1092,84 +1161,138 @@
             messagesContainer.appendChild(tempMessage);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
-            // Add a timeout to handle stuck translations
-            const translationTimeout = setTimeout(() => {
-                console.warn(`Translation timeout for message: ${translationId}`);
+            // Track retry attempts
+            let retryCount = 0;
+            const MAX_RETRIES = 2;
+            
+            // Function to attempt translation with retry
+            function attemptTranslation() {
+                // Add a timeout to handle stuck translations
+                const translationTimeout = setTimeout(() => {
+                    console.warn(`Translation timeout for message: ${translationId} (attempt ${retryCount + 1}/${MAX_RETRIES + 1})`);
+                    
+                    if (retryCount < MAX_RETRIES) {
+                        // Try again
+                        retryCount++;
+                        console.log(`Retrying translation (attempt ${retryCount + 1}/${MAX_RETRIES + 1})...`);
+                        attemptTranslation();
+                        return;
+                    }
+                    
+                    // We've reached max retries, show original message
+                    // Hide loading indicator
+                    processingIndicator.style.display = 'none';
+                    
+                    // Remove placeholder message
+                    const placeholder = document.getElementById(translationId);
+                    if (placeholder) {
+                        messagesContainer.removeChild(placeholder);
+                    }
+                    
+                    // Show original message if translation timed out
+                    addMessageToUI(message, false);
+                    
+                }, TRANSLATION_TIMEOUT);
                 
-                // Hide loading indicator
-                processingIndicator.style.display = 'none';
+                // Store timeout reference
+                translationTimeouts[translationId] = translationTimeout;
                 
-                // Remove placeholder message
-                const placeholder = document.getElementById(translationId);
-                if (placeholder) {
-                    messagesContainer.removeChild(placeholder);
+                // Attempt direct translation for short messages
+                let translationPromise;
+                
+                if (message.text.length < 50) {
+                    // For short messages, try to get an immediate result from wordByWordTranslation or fallbackTranslate
+                    const wordByWordResult = basicWordTranslation(message.text, sourceLang, targetLang);
+                    if (wordByWordResult !== message.text) {
+                        translationPromise = Promise.resolve(wordByWordResult);
+                    } else if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                        const fallbackResult = fallbackTranslate(message.text, `${sourceLang}-${targetLang}`);
+                        if (fallbackResult !== message.text.toLowerCase()) {
+                            translationPromise = Promise.resolve(fallbackResult);
+                        }
+                    }
                 }
                 
-                // Show original message if translation timed out
-                addMessageToUI(message, false);
+                // If no immediate result, use the full translation service
+                if (!translationPromise) {
+                    translationPromise = translateText(message.text, sourceLang, targetLang);
+                }
                 
-            }, TRANSLATION_TIMEOUT);
+                // Process the translation result
+                translationPromise
+                    .then(translatedText => {
+                        // Clear the timeout
+                        clearTimeout(translationTimeouts[translationId]);
+                        delete translationTimeouts[translationId];
+                        
+                        // Hide loading indicator
+                        processingIndicator.style.display = 'none';
+                        
+                        // Remove placeholder message
+                        const placeholder = document.getElementById(translationId);
+                        if (placeholder) {
+                            messagesContainer.removeChild(placeholder);
+                        }
+                        
+                        // Create a unique message ID
+                        const messageId = `msg-${message.sender}-${message.timestamp || Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                        
+                        // Create translation message
+                        const translationMessage = {
+                            isTranslation: true,
+                            originalSender: message.sender,
+                            senderName: message.senderName,
+                            originalText: message.text,
+                            text: translatedText,
+                            originalLang: sourceLang,
+                            targetLang: targetLang,
+                            timestamp: firebase.database.ServerValue.TIMESTAMP,
+                            messageId: messageId
+                        };
+                        
+                        // Send translation to Firebase
+                        messagesRef.push(translationMessage)
+                            .catch(error => {
+                                console.error('Error sending translation to Firebase:', error);
+                                // Still show the translation locally even if Firebase fails
+                                addTranslatedMessageToUI(translationMessage, false);
+                            });
+                        
+                        // Show the translated message immediately
+                        addTranslatedMessageToUI(translationMessage, false);
+                    })
+                    .catch(error => {
+                        // Clear the timeout
+                        clearTimeout(translationTimeouts[translationId]);
+                        delete translationTimeouts[translationId];
+                        
+                        console.error(`Translation error for ID: ${translationId} (attempt ${retryCount + 1}/${MAX_RETRIES + 1}):`, error);
+                        
+                        if (retryCount < MAX_RETRIES) {
+                            // Try again
+                            retryCount++;
+                            console.log(`Retrying translation (attempt ${retryCount + 1}/${MAX_RETRIES + 1})...`);
+                            setTimeout(attemptTranslation, 500); // Add a small delay before retry
+                            return;
+                        }
+                        
+                        // We've reached max retries, show original message
+                        // Hide loading indicator
+                        processingIndicator.style.display = 'none';
+                        
+                        // Remove placeholder message
+                        const placeholder = document.getElementById(translationId);
+                        if (placeholder) {
+                            messagesContainer.removeChild(placeholder);
+                        }
+                        
+                        // Show original message if translation failed
+                        addMessageToUI(message, false);
+                    });
+            }
             
-            // Store timeout reference
-            translationTimeouts[translationId] = translationTimeout;
-            
-            // Translate the message
-            translateText(message.text, sourceLang, targetLang)
-                .then(translatedText => {
-                    // Clear the timeout
-                    clearTimeout(translationTimeouts[translationId]);
-                    delete translationTimeouts[translationId];
-                    
-                    // Hide loading indicator
-                    processingIndicator.style.display = 'none';
-                    
-                    // Remove placeholder message
-                    const placeholder = document.getElementById(translationId);
-                    if (placeholder) {
-                        messagesContainer.removeChild(placeholder);
-                    }
-                    
-                    // Create a unique message ID
-                    const messageId = `msg-${message.sender}-${message.timestamp || Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-                    
-                    // Create translation message
-                    const translationMessage = {
-                        isTranslation: true,
-                        originalSender: message.sender,
-                        senderName: message.senderName,
-                        originalText: message.text,
-                        text: translatedText,
-                        originalLang: sourceLang,
-                        targetLang: targetLang,
-                        timestamp: firebase.database.ServerValue.TIMESTAMP,
-                        messageId: messageId
-                    };
-                    
-                    // Send translation to Firebase
-                    messagesRef.push(translationMessage);
-                    
-                    // Show the translated message immediately
-                    addTranslatedMessageToUI(translationMessage, false);
-                })
-                .catch(error => {
-                    // Clear the timeout
-                    clearTimeout(translationTimeouts[translationId]);
-                    delete translationTimeouts[translationId];
-                    
-                    console.error(`Translation error for ID: ${translationId}`, error);
-                    
-                    // Hide loading indicator
-                    processingIndicator.style.display = 'none';
-                    
-                    // Remove placeholder message
-                    const placeholder = document.getElementById(translationId);
-                    if (placeholder) {
-                        messagesContainer.removeChild(placeholder);
-                    }
-                    
-                    // Show original message if translation failed
-                    addMessageToUI(message, false);
-                });
+            // Start the initial translation attempt
+            attemptTranslation();
         }
         
         // Update user language
@@ -1431,41 +1554,114 @@
                 });
         }
         
-        // Simple direct translation function with improved error handling
+        // Enhanced direct translation function with improved error handling and fallbacks
         async function translateText(text, sourceLang, targetLang) {
             console.log(`Translation requested: ${sourceLang} → ${targetLang}: "${text.substring(0, 30)}${text.length > 30 ? '...' : ''}"`);
             
+            // For very short messages (1-3 words), try dictionary first as it's faster
+            if (text.split(/\s+/).length <= 3) {
+                // Try word-by-word translation first for short phrases
+                const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
+                if (wordByWordResult !== text) {
+                    console.log(`Word-by-word translation succeeded for short text: "${wordByWordResult}"`);
+                    return wordByWordResult;
+                }
+                
+                // Try fallback dictionary for short phrases (English/Spanish only)
+                if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                    const fallbackText = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
+                    if (fallbackText !== text.toLowerCase()) {
+                        console.log(`Fallback translation succeeded for short text: "${fallbackText}"`);
+                        return fallbackText;
+                    }
+                }
+            }
+            
+            // For normal text, try the full translation service
             try {
+                // First check if we have any global errors with translation services
+                const allEndpointsFailing = Object.values(TranslationService.endpointStats.failureCounts)
+                    .every(count => count > 10);
+                    
+                if (allEndpointsFailing) {
+                    console.log('All translation endpoints appear to be failing. Resetting failure counts.');
+                    // Reset all failure counts to allow retrying
+                    Object.keys(TranslationService.endpointStats.failureCounts).forEach(key => {
+                        TranslationService.endpointStats.failureCounts[key] = 0;
+                    });
+                }
+                
+                // Try the full translation service
                 const translatedText = await TranslationService.translate(text, sourceLang, targetLang);
                 console.log(`Translation successful: "${translatedText.substring(0, 30)}${translatedText.length > 30 ? '...' : ''}"`);
                 return translatedText;
             } catch (error) {
-                console.error('Translation error:', error);
+                console.error('Translation service error:', error);
                 
-                // Try fallback methods
+                // Try fallback methods (for any language)
                 try {
-                    // If all translation services fail, use fallback dictionary translation
+                    // Try word-by-word translation as a fallback
+                    const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
+                    if (wordByWordResult !== text) {
+                        console.log(`Word-by-word translation succeeded as fallback: "${wordByWordResult.substring(0, 30)}${wordByWordResult.length > 30 ? '...' : ''}"`);
+                        return wordByWordResult;
+                    }
+                    
+                    // If specific language pair supported, try fallback dictionary
                     if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
                         console.log('Trying fallback dictionary translation');
                         const fallbackText = fallbackTranslate(text, `${sourceLang}-${targetLang}`);
                         if (fallbackText !== text.toLowerCase()) {
-                            console.log(`Fallback translation succeeded: "${fallbackText.substring(0, 30)}${fallbackText.length > 30 ? '...' : ''}"`);
+                            console.log(`Fallback dictionary translation succeeded: "${fallbackText.substring(0, 30)}${fallbackText.length > 30 ? '...' : ''}"`);
                             return fallbackText;
                         }
                     }
-                    
-                    // Try word-by-word translation as a last resort
-                    const wordByWordResult = basicWordTranslation(text, sourceLang, targetLang);
-                    if (wordByWordResult !== text) {
-                        console.log(`Word-by-word translation succeeded: "${wordByWordResult.substring(0, 30)}${wordByWordResult.length > 30 ? '...' : ''}"`);
-                        return wordByWordResult;
-                    }
                 } catch (fallbackError) {
-                    console.error('Fallback translation failed:', fallbackError);
+                    console.error('All fallback translation methods failed:', fallbackError);
                 }
                 
-                // If all fails, just return the original text
-                console.log('All translation methods failed, using original text');
+                // Last resort: Try to translate individual sentences
+                try {
+                    if (text.length > 30) {
+                        console.log('Attempting to translate by breaking text into sentences');
+                        const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+                        if (sentences.length > 1) {
+                            const translatedSentences = await Promise.all(
+                                sentences.map(async (sentence) => {
+                                    try {
+                                        // Try basic word translation first (it's faster)
+                                        const wordResult = basicWordTranslation(sentence, sourceLang, targetLang);
+                                        if (wordResult !== sentence) {
+                                            return wordResult;
+                                        }
+                                        
+                                        // Then try fallback
+                                        if ((sourceLang === 'en' && targetLang === 'es') || (sourceLang === 'es' && targetLang === 'en')) {
+                                            const fallbackResult = fallbackTranslate(sentence, `${sourceLang}-${targetLang}`);
+                                            if (fallbackResult !== sentence.toLowerCase()) {
+                                                return fallbackResult;
+                                            }
+                                        }
+                                        
+                                        // Return original if everything fails
+                                        return sentence;
+                                    } catch (e) {
+                                        return sentence; // Return original on error
+                                    }
+                                })
+                            );
+                            
+                            const combinedTranslation = translatedSentences.join(' ');
+                            console.log(`Sentence-by-sentence translation result: "${combinedTranslation.substring(0, 30)}${combinedTranslation.length > 30 ? '...' : ''}"`);
+                            return combinedTranslation;
+                        }
+                    }
+                } catch (sentenceError) {
+                    console.error('Sentence-by-sentence translation failed:', sentenceError);
+                }
+                
+                // If absolutely everything fails, just return the original text
+                console.log('All translation methods exhausted, using original text');
                 return text;
             }
         }
