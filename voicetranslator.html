@@ -590,28 +590,30 @@
         let participantsList, audioLevelBar;
         
         // Global variables
-        let isRecording = false;
+        let database = null;
         let roomId = null;
         let userId = null;
-        let username = '';
-        let speechRecognition = null;
-        let hasJoined = false;
-        let database = null;
+        let username = null;
         let roomRef = null;
-        let userRef = null;
         let messagesRef = null;
         let participantsRef = null;
-        let currentParticipants = {};
-        let recordingTimeout = null;
-        let silenceTimer = null;
-        let lastSpeechTimestamp = 0;
-        let translationTimeouts = {};
+        let userRef = null;
+        let hasJoined = false;
+        let isRecording = false;
+        let mediaRecorder = null;
         let audioContext = null;
-        let audioAnalyser = null;
-        let microphoneStream = null;
-        
-        // Get supported languages from each LibreTranslate instance
+        let analyzer = null;
+        let audioSource = null;
+        let recordingStartTime = 0;
+        let lastAudioTime = 0;
+        let recordingTimeout = null;
+        let silenceTimeout = null;
+        let audioChunks = [];
         let supportedLanguagePairs = [];
+        
+        // Initialize Firebase attempt tracking
+        let firebaseInitAttempts = 0;
+        const MAX_INIT_ATTEMPTS = 3;
         
         async function checkTranslationServices() {
             if (supportedLanguagePairs.length > 0) return;
@@ -713,8 +715,8 @@
         };
         
         // Global variable to track initialization attempts
-        let firebaseInitAttempts = 0;
-        const MAX_INIT_ATTEMPTS = 3;
+        // let firebaseInitAttempts = 0;
+        // const MAX_INIT_ATTEMPTS = 3;
         
         // Enhanced multi-service translation system
         const TranslationService = {
@@ -1069,6 +1071,11 @@
                 firebaseInitAttempts++;
                 console.log(`Firebase initialization attempt ${firebaseInitAttempts}/${MAX_INIT_ATTEMPTS}`);
                 
+                // Get connection status elements - safely
+                const connectionStatus = document.getElementById('connectionStatus');
+                const connectionText = document.getElementById('connectionText');
+                const joinButton = document.getElementById('joinButton');
+                
                 // Check if Firebase SDK is loaded
                 if (typeof firebase === 'undefined') {
                     console.error("Firebase SDK is not loaded. Check network connections and script tags.");
@@ -1097,28 +1104,39 @@
                 database = firebase.database();
                 console.log("Firebase initialized successfully");
                 
-                // Update connection status
-                connectionStatus.className = 'status connecting';
-                connectionText.textContent = 'Connecting...';
+                // Update connection status if elements exist
+                if (connectionStatus && connectionText) {
+                    connectionStatus.className = 'status connecting';
+                    connectionText.textContent = 'Connecting...';
+                } else {
+                    console.warn("Connection status elements not found");
+                }
                 
                 // Check connection status
                 const connectedRef = database.ref('.info/connected');
                 connectedRef.on('value', (snap) => {
+                    // Get elements again in case they've been added to DOM since initialization
+                    const statusEl = document.getElementById('connectionStatus');
+                    const textEl = document.getElementById('connectionText');
+                    const joinBtn = document.getElementById('joinButton');
+                    
                     if (snap.val() === true) {
-                        connectionStatus.className = 'status connected';
-                        connectionText.textContent = 'Connected';
+                        // Connected
+                        if (statusEl) statusEl.className = 'status connected';
+                        if (textEl) textEl.textContent = 'Connected';
                         
                         // If we were trying to join but couldn't, enable the join button again
-                        if (!hasJoined && joinButton.disabled) {
-                            joinButton.disabled = false;
-                            joinButton.textContent = 'Join Chat';
+                        if (typeof hasJoined !== 'undefined' && !hasJoined && joinBtn && joinBtn.disabled) {
+                            joinBtn.disabled = false;
+                            joinBtn.textContent = 'Join Chat';
                         }
                     } else {
-                        connectionStatus.className = 'status disconnected';
-                        connectionText.textContent = 'Disconnected';
+                        // Disconnected
+                        if (statusEl) statusEl.className = 'status disconnected';
+                        if (textEl) textEl.textContent = 'Disconnected';
                         
                         // Attempt to reconnect if disconnected and we're already joined
-                        if (hasJoined) {
+                        if (typeof hasJoined !== 'undefined' && hasJoined) {
                             setTimeout(() => {
                                 console.log('Attempting to reconnect to Firebase...');
                                 reconnectFirebase();
@@ -1128,14 +1146,14 @@
                 });
                 
                 // Re-enable join button if it was disabled
-                if (joinButton.textContent === 'Joining...') {
+                if (joinButton && joinButton.textContent === 'Joining...') {
                     joinButton.disabled = false;
                     joinButton.textContent = 'Join Chat';
                 }
                 
                 // Set a flag that Firebase is ready
                 window.firebaseReady = true;
-                firebaseInitAttempts = 0; // Reset counter on success
+                // firebaseInitAttempts = 0; // Reset counter on success
                 
                 return true;
             } catch (error) {
@@ -2509,15 +2527,15 @@
                     .then(stream => {
                         // Create audio context
                         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        audioAnalyser = audioContext.createAnalyser();
-                        microphoneStream = audioContext.createMediaStreamSource(stream);
+                        analyzer = audioContext.createAnalyser();
+                        audioSource = audioContext.createMediaStreamSource(stream);
                         
                         // Connect nodes
-                        microphoneStream.connect(audioAnalyser);
+                        audioSource.connect(analyzer);
                         
                         // Set up analyser
-                        audioAnalyser.fftSize = 256;
-                        const bufferLength = audioAnalyser.frequencyBinCount;
+                        analyzer.fftSize = 256;
+                        const bufferLength = analyzer.frequencyBinCount;
                         const dataArray = new Uint8Array(bufferLength);
                         
                         // Start visualization loop
@@ -2527,7 +2545,7 @@
                                 return;
                             }
                             
-                            audioAnalyser.getByteFrequencyData(dataArray);
+                            analyzer.getByteFrequencyData(dataArray);
                             
                             // Calculate average level
                             let sum = 0;
@@ -2847,16 +2865,182 @@
             
             // Initialize Firebase - direct approach
             try {
-                console.log("Calling enhanced Firebase initialization...");
-                // Use the improved initialization function instead of direct initialization
-                initFirebase();
+                console.log("Setting up safer Firebase initialization...");
                 
-                // Connection status is now handled in the initFirebase function
+                // Make sure hasJoined is defined
+                window.hasJoined = false;
+                
+                // Short delay to ensure DOM is fully loaded
+                setTimeout(() => {
+                    // Initialize Firebase safely
+                    safeInitializeFirebase();
+                }, 200);
+                
+                // Add event listener for username input to handle Enter key
+                if (usernameInput) {
+                    usernameInput.addEventListener('keypress', function(e) {
+                        if (e.key === 'Enter' && joinButton && !joinButton.disabled) {
+                            joinButton.click();
+                        }
+                    });
+                }
             } catch (e) {
-                console.error("Failed to initialize Firebase directly:", e);
-                showError("Failed to initialize Firebase: " + e.message);
+                console.error("Failed to initialize setup:", e);
+                showError("Error setting up: " + e.message);
             }
         });
+        
+        // Safe Firebase initialization that checks for DOM elements first
+        function safeInitializeFirebase() {
+            console.log("Starting safe Firebase initialization");
+            let initAttempts = 0;
+            const maxAttempts = 3;
+            
+            function attemptInit() {
+                initAttempts++;
+                console.log(`Firebase initialization attempt ${initAttempts}/${maxAttempts}`);
+                
+                try {
+                    // Get required DOM elements
+                    const connectionStatus = document.getElementById('connectionStatus');
+                    const connectionText = document.getElementById('connectionText');
+                    const joinButton = document.getElementById('joinButton');
+                    
+                    // Check if Firebase SDK is loaded
+                    if (typeof firebase === 'undefined') {
+                        console.error("Firebase SDK is not loaded");
+                        if (initAttempts < maxAttempts) {
+                            console.log("Will retry in 1 second");
+                            setTimeout(attemptInit, 1000);
+                            return;
+                        }
+                        showError("Firebase SDK not loaded. Please refresh the page.");
+                        return;
+                    }
+                    
+                    // Initialize Firebase
+                    if (!firebase.apps.length) {
+                        console.log("Initializing Firebase app");
+                        firebase.initializeApp(firebaseConfig);
+                    } else {
+                        console.log("Using existing Firebase app");
+                        firebase.app();
+                    }
+                    
+                    // Set up database
+                    database = firebase.database();
+                    console.log("Firebase database initialized");
+                    
+                    // Update connection status if elements exist
+                    if (connectionStatus && connectionText) {
+                        connectionStatus.className = 'status connecting';
+                        connectionText.textContent = 'Connecting...';
+                    }
+                    
+                    // Set up connection monitoring
+                    const connectedRef = database.ref('.info/connected');
+                    connectedRef.on('value', (snap) => {
+                        // Re-get elements each time
+                        const statusEl = document.getElementById('connectionStatus');
+                        const textEl = document.getElementById('connectionText');
+                        const joinBtn = document.getElementById('joinButton');
+                        
+                        if (snap.val() === true) {
+                            console.log("Connected to Firebase");
+                            if (statusEl) statusEl.className = 'status connected';
+                            if (textEl) textEl.textContent = 'Connected';
+                            
+                            if (joinBtn && joinBtn.disabled && joinBtn.textContent === 'Joining...') {
+                                joinBtn.disabled = false;
+                                joinBtn.textContent = 'Join Chat';
+                            }
+                        } else {
+                            // Disconnected
+                            if (statusEl) statusEl.className = 'status disconnected';
+                            if (textEl) textEl.textContent = 'Disconnected';
+                            
+                            // Attempt to reconnect if disconnected and we're already joined
+                            if (typeof hasJoined !== 'undefined' && hasJoined) {
+                                setTimeout(() => {
+                                    console.log('Attempting to reconnect to Firebase...');
+                                    reconnectFirebase();
+                                }, 3000);
+                            }
+                        }
+                    });
+                    
+                    // Re-enable join button if it was disabled
+                    if (joinButton && joinButton.textContent === 'Joining...') {
+                        joinButton.disabled = false;
+                        joinButton.textContent = 'Join Chat';
+                    }
+                    
+                    window.firebaseReady = true;
+                    console.log("Firebase initialization complete");
+                } catch (error) {
+                    console.error("Firebase initialization error:", error);
+                    
+                    if (initAttempts < maxAttempts) {
+                        console.log(`Will retry in 1 second (attempt ${initAttempts}/${maxAttempts})`);
+                        setTimeout(attemptInit, 1000);
+                    } else {
+                        showError(`Failed to initialize Firebase: ${error.message}`);
+                    }
+                }
+            }
+            
+            // Start initialization
+            attemptInit();
+        }
+        
+        // Reconnect to Firebase if disconnected
+        function reconnectFirebase() {
+            if (!hasJoined) return;
+            
+            try {
+                // Force reconnect by resetting the database reference
+                database.goOffline();
+                database.goOnline();
+                
+                // Re-establish references
+                roomRef = database.ref(`rooms/${roomId}`);
+                messagesRef = roomRef.child('messages');
+                participantsRef = roomRef.child('participants');
+                userRef = participantsRef.child(userId);
+                
+                // Re-add user to participants if we were previously joined
+                if (username) {
+                    userRef.set({
+                        username: username,
+                        language: myLanguageSelect.value,
+                        joinedAt: firebase.database.ServerValue.TIMESTAMP,
+                        lastActive: firebase.database.ServerValue.TIMESTAMP
+                    });
+                    
+                    // Remove user when disconnected
+                    userRef.onDisconnect().remove();
+                    
+                    // Re-setup listeners
+                    setupMessageListener();
+                    setupParticipantsListener();
+                    
+                    console.log('Successfully reconnected to Firebase');
+                    
+                    // Add system message about reconnection
+                    const reconnectMessage = {
+                        type: 'system',
+                        text: `${username} has reconnected to the chat`,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    };
+                    
+                    messagesRef.push(reconnectMessage);
+                }
+            } catch (error) {
+                console.error('Error reconnecting to Firebase:', error);
+                // Try again after a delay
+                setTimeout(reconnectFirebase, 5000);
+            }
+        }
     </script>
 </body>
 </html>
