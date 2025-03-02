@@ -634,6 +634,30 @@
             // Translation endpoints that don't require API keys
             endpoints: [
                 {
+                    name: 'MyMemory',
+                    url: (text, from, to) => `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}&de=voicetranslator@example.com`,
+                    method: 'GET',
+                    responseHandler: (response) => response.json().then(data => {
+                        if (data.responseStatus === 200 && data.responseData) {
+                            return data.responseData.translatedText;
+                        }
+                        throw new Error('MyMemory translation failed');
+                    })
+                },
+                {
+                    name: 'LibreTranslate-Ireland',
+                    url: 'https://translate.terraprint.co/translate',
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: (text, from, to) => JSON.stringify({
+                        q: text,
+                        source: from,
+                        target: to,
+                        format: "text"
+                    }),
+                    responseHandler: (response) => response.json().then(data => data.translatedText)
+                },
+                {
                     name: 'LibreTranslate-Argos',
                     url: 'https://translate.argosopentech.com/translate',
                     method: 'POST',
@@ -660,19 +684,6 @@
                     responseHandler: (response) => response.json().then(data => data.translatedText)
                 },
                 {
-                    name: 'LibreTranslate-Ireland',
-                    url: 'https://translate.terraprint.co/translate',
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: (text, from, to) => JSON.stringify({
-                        q: text,
-                        source: from,
-                        target: to,
-                        format: "text"
-                    }),
-                    responseHandler: (response) => response.json().then(data => data.translatedText)
-                },
-                {
                     name: 'LibreTranslate-Zhukaaux',
                     url: 'https://translate.zhukaaux.xyz/translate',
                     method: 'POST',
@@ -684,18 +695,8 @@
                         format: "text"
                     }),
                     responseHandler: (response) => response.json().then(data => data.translatedText)
-                },
-                {
-                    name: 'MyMemory',
-                    url: (text, from, to) => `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}&de=voicetranslator@example.com`,
-                    method: 'GET',
-                    responseHandler: (response) => response.json().then(data => {
-                        if (data.responseStatus === 200 && data.responseData) {
-                            return data.responseData.translatedText;
-                        }
-                        throw new Error('MyMemory translation failed');
-                    })
                 }
+            ],
             ],
             
             // Translation cache with expiration
